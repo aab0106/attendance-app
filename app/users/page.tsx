@@ -147,8 +147,17 @@ function UserRow({ user, onUpdate, deptList }: {
   };
 
   const handleRevokeDevice = async () => {
-    if (!confirm("Revoke this device? The user will need to re-register.")) return;
-    await updateDoc(doc(db, "users", user.id), { "device.approved": false, "device.deviceId": null });
+    if (!confirm(`Revoke device for ${user.name ?? user.email}?
+
+They will be logged out and must register their device again on next login.`)) return;
+    await updateDoc(doc(db, "users", user.id), {
+      "device.approved":      false,
+      "device.deviceId":      null,
+      "device.brand":         null,
+      "device.modelName":     null,
+      "device.registeredAt":  null,
+      "device.revokedAt":     new Date().toISOString(),
+    });
     onUpdate();
   };
 
