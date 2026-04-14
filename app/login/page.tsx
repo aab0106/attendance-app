@@ -26,7 +26,7 @@ export default function LoginPage() {
       const roles: string[] = Array.isArray(data.role)
         ? data.role
         : (data.role ?? "").split(",").map((r: string) => r.trim());
-      if (!roles.some(r => ["admin","manager","hr"].includes(r))) {
+      if (!roles.some(r => ["admin","manager","director","hr"].includes(r))) {
         setError("You don't have portal access. Use the mobile app instead.");
         await auth.signOut(); return;
       }
@@ -88,7 +88,7 @@ export default function LoginPage() {
           </form>
 
           <p className="text-center text-gray-400 text-xs mt-6">
-            Portal access is restricted to admin, manager and HR roles only
+            Portal access is restricted to admin, manager, director and HR roles only
           </p>
         </div>
       </div>
