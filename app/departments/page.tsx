@@ -53,10 +53,11 @@ function DeptCard({
     directorIds: dept.directorIds ?? [],
     mdIds: dept.mdIds ?? [],
   });
-  const [saving, setSaving] = useState(false);
+  const [saving, setSaving]   = useState(false);
+  const [headSearch, setHeadSearch] = useState("");
 
   const subDepts    = allDepts.filter(d => d.parentDeptId === dept.id);
-  const managers    = allUsers.filter(u => getRoles(u).some(r => ["manager","director","admin"].includes(r)));
+  const managers    = allUsers; // ALL users can be assigned as head — no role restriction
   const directors   = allUsers.filter(u => getRoles(u).some(r => ["director","admin"].includes(r)));
   const mds         = allUsers.filter(u => getRoles(u).some(r => ["director","admin"].includes(r)));
   const parentDepts = allDepts.filter(d => d.id !== dept.id && !d.parentDeptId);
@@ -73,6 +74,7 @@ function DeptCard({
   const handleSave = async () => {
     setSaving(true);
     try {
+      // Save department
       await updateDoc(doc(db, "departments", dept.id), {
         name:        form.name.trim(),
         parentDeptId: form.parentDeptId || null,
@@ -81,6 +83,47 @@ function DeptCard({
         mdIds:       form.mdIds,
         updatedAt:   serverTimestamp(),
       });
+
+      // Auto-update roles on users:
+      // Newly added heads → add "manager" role
+      const prevHeads = dept.headIds ?? [];
+      const newHeads  = form.headIds;
+      const added     = newHeads.filter(uid => !prevHeads.includes(uid));
+      const removed   = prevHeads.filter(uid => !newHeads.includes(uid));
+
+      await Promise.all([
+        // Add manager role to newly assigned heads
+        ...added.map(async uid => {
+          const u = allUsers.find(x => x.id === uid);
+          if (!u) return;
+          const roles = getRoles(u);
+          if (!roles.includes("manager")) {
+            const newRoles = [...roles, "manager"];
+            await updateDoc(doc(db, "users", uid), {
+              role: newRoles.length === 1 ? newRoles[0] : newRoles
+            });
+          }
+        }),
+        // Check if removed heads are still head of another dept before removing manager role
+        ...removed.map(async uid => {
+          // Check if this user is still a head in any other dept
+          const stillHead = await getDocs(query(
+            collection(db, "departments"),
+            where("active", "==", true),
+            where("headIds", "array-contains", uid)
+          ));
+          // Only remove manager role if not head of any dept
+          if (stillHead.empty) {
+            const u = allUsers.find(x => x.id === uid);
+            if (!u) return;
+            const roles = getRoles(u).filter(r => r !== "manager");
+            await updateDoc(doc(db, "users", uid), {
+              role: roles.length === 1 ? roles[0] : (roles.length === 0 ? "employee" : roles)
+            });
+          }
+        }),
+      ]);
+
       setEditing(false); onRefresh();
     } catch(e: any) { alert(e.message); }
     finally { setSaving(false); }
@@ -134,7 +177,7 @@ function DeptCard({
               {/* View mode */}
               <div className="mt-4 space-y-3">
                 {[
-                  { label: "Department Heads", ids: dept.headIds ?? [], color: "bg-blue-100 text-blue-700" },
+                  { label: `Department Heads (${(dept.headIds??[]).length})`, ids: dept.headIds ?? [], color: "bg-blue-100 text-blue-700" },
                   { label: "Directors", ids: dept.directorIds ?? [], color: "bg-purple-100 text-purple-700" },
                   { label: "Managing Directors", ids: dept.mdIds ?? [], color: "bg-red-100 text-red-700" },
                 ].map(row => (
@@ -181,13 +224,18 @@ function DeptCard({
                   </select>
                 </div>
                 {[
-                  { label: "Department Heads (managers)", field: "headIds" as const, pool: managers },
+                  { label: "Department Heads (any employee can be assigned)", field: "headIds" as const, pool: managers.filter(u => !headSearch || (u.name??u.email??"").toLowerCase().includes(headSearch.toLowerCase())) },
                   { label: "Directors", field: "directorIds" as const, pool: directors },
                   { label: "Managing Directors", field: "mdIds" as const, pool: mds },
                 ].map(row => (
                   <div key={row.field}>
                     <label className="block text-xs font-bold text-gray-500 uppercase mb-1.5">{row.label}</label>
-                    <div className="max-h-32 overflow-y-auto border border-gray-100 rounded-xl p-2 space-y-0.5">
+                    {row.field === "headIds" && (
+                      <input value={headSearch} onChange={e=>setHeadSearch(e.target.value)}
+                        placeholder="Search employee..."
+                        className="w-full border border-gray-200 rounded-lg px-3 py-1.5 text-sm mb-1.5 focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                    )}
+                    <div className="max-h-40 overflow-y-auto border border-gray-100 rounded-xl p-2 space-y-0.5">
                       {row.pool.map(u => (
                         <button key={u.id} type="button"
                           onClick={() => toggleId(row.field, u.id)}

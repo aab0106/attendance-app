@@ -393,7 +393,7 @@ export default function MonthlyReportPage() {
         <div className="flex gap-2">
           <button onClick={exportCSV} className="bg-green-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-green-700">CSV ↓</button>
           <button onClick={exportPDF} disabled={view!=="detail" || !detailUser}
-            className="bg-gray-900 text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-green-700">
+            className="bg-indigo-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-indigo-700 disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center gap-1.5">
             🖨️ <span>PDF</span>
           </button>
         </div>
@@ -559,7 +559,7 @@ export default function MonthlyReportPage() {
                     })}
                     <tr className="bg-gray-900 border-t-2 border-gray-700">
                       <td colSpan={8} className="px-3 py-3 text-sm font-bold text-white">TOTAL</td>
-                      <td className={`px-3 py-3 text-sm font-bold text-center whitespace-nowrap ${detailRows.reduce((a,r)=>a+(r.excessMins??0),0)<0?"text-white":"text-green-300"}`}>
+                      <td className={`px-3 py-3 text-sm font-bold text-center whitespace-nowrap ${detailRows.reduce((a,r)=>a+(r.excessMins??0),0)<0?"text-red-300":"text-green-300"}`}>
                         {fmtHM(detailRows.reduce((a,r)=>a+(r.excessMins??0),0))}
                       </td>
                       <td className="px-3 py-3"/>

@@ -44,6 +44,7 @@ function EditUserModal({ user, deptList, onClose, onSaved }: {
   const [designation, setDesig]   = useState(user.designation ?? "");
   const [employeeId, setEmpId]    = useState(user.employeeId ?? "");
   const [roles, setRoles]         = useState<string[]>(getRoles(user));
+  const [joiningDate, setJoining] = useState<string>((user as any).joiningDate ?? "");
   const [saving, setSaving]       = useState(false);
   const [error, setError]         = useState("");
 
@@ -86,6 +87,12 @@ function EditUserModal({ user, deptList, onClose, onSaved }: {
             <label className="block text-sm font-semibold text-gray-600 mb-1.5">Designation</label>
             <input value={designation} onChange={e => setDesig(e.target.value)} placeholder="e.g. Engineer"
               className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+          <div>
+            <label className="block text-sm font-semibold text-gray-600 mb-1.5">Joining Date *</label>
+            <input type="date" value={joiningDate} onChange={e=>setJoining(e.target.value)}
+              className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            <p className="text-xs text-gray-400 mt-1">Absent marking starts from this date</p>
           </div>
           <div className="col-span-2">
             <label className="block text-sm font-semibold text-gray-600 mb-1.5">Department</label>
@@ -286,6 +293,7 @@ function AddUserModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =
   const [designation, setDesig]   = useState("");
   const [employeeId, setEmpId]    = useState("");
   const [roles, setRoles]         = useState<string[]>(["employee"]);
+  const [joiningDate, setJoining] = useState(() => new Date().toISOString().split("T")[0]);
   const [saving, setSaving]       = useState(false);
   const [error, setError]         = useState("");
   const [depts, setDepts]         = useState<{id:string;name:string}[]>([]);
@@ -319,6 +327,7 @@ function AddUserModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =
         employeeId:  employeeId.trim() || null,
         blocked:     false,
         device:      { deviceId: null, approved: false },
+        joiningDate: joiningDate || new Date().toISOString().split("T")[0],
         createdAt:   serverTimestamp(),
       });
       onAdded(); onClose();
@@ -355,6 +364,12 @@ function AddUserModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =
             <label className="block text-sm font-semibold text-gray-600 mb-1.5">Password * (min 6 characters)</label>
             <input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="Set initial password"
               className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+          <div>
+            <label className="block text-sm font-semibold text-gray-600 mb-1.5">Joining Date *</label>
+            <input type="date" value={joiningDate} onChange={e=>setJoining(e.target.value)}
+              className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            <p className="text-xs text-gray-400 mt-1">Absent marking starts from this date</p>
           </div>
           <div className="col-span-2">
             <label className="block text-sm font-semibold text-gray-600 mb-1.5">Department</label>
