@@ -144,7 +144,7 @@ export default function VisitReportPage() {
       ));
       const visits = snap.docs.map(d=>({id:d.id,...d.data()} as Visit));
       // Enrich with actual user names from users collection
-      const userIds = [...new Set(visits.map(v=>v.userId))];
+      const userIds = Array.from(new Set(visits.map(v=>v.userId)));
       const userMap = new Map<string,string>();
       await Promise.all(userIds.map(async uid => {
         try {

@@ -32,7 +32,7 @@ export async function getTeamMembersForManager(managerUid: string, db: Firestore
     const allDeptsSnap = await getDocs(query(collection(db, "departments"), where("active", "==", true)));
     const allDepts     = allDeptsSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
     const subDeptIds   = allDepts.filter((d: any) => d.parentDeptId && deptIds.includes(d.parentDeptId)).map((d: any) => d.id);
-    const allDeptIds   = [...new Set([...deptIds, ...subDeptIds])];
+    const allDeptIds   = Array.from(new Set([...deptIds, ...subDeptIds]));
     const deptNames    = allDeptsSnap.docs.filter(d => allDeptIds.includes(d.id)).map(d => d.data().name as string);
 
     const userSnaps = await Promise.all([
@@ -52,7 +52,7 @@ export async function getTeamMembersForManager(managerUid: string, db: Firestore
   // Fallback: teams collection
   const teamSnap = await getDocs(query(collection(db, "teams"), where("active", "==", true), where("managerIds", "array-contains", managerUid)));
   if (!teamSnap.empty) {
-    const uids = [...new Set(teamSnap.docs.flatMap(d => (d.data().memberIds ?? []) as string[]))];
+    const uids = Array.from(new Set(teamSnap.docs.flatMap(d => (d.data().memberIds ?? []) as string[])));
     const users = await Promise.all(uids.map(uid => getDoc(doc(db, "users", uid)).then(d => d.exists() ? { id: d.id, ...d.data() } : null).catch(() => null)));
     const result = users.filter(Boolean);
     if (result.length > 0) return result;
@@ -84,7 +84,7 @@ export async function getDirectorMembers(directorUid: string, db: Firestore) {
   const allDeptsSnap = await getDocs(query(collection(db, "departments"), where("active", "==", true)));
   const allDepts     = allDeptsSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
   const subDeptIds   = allDepts.filter((d: any) => d.parentDeptId && topDeptIds.includes(d.parentDeptId)).map((d: any) => d.id);
-  const allDeptIds   = [...new Set([...topDeptIds, ...subDeptIds])];
+  const allDeptIds   = Array.from(new Set([...topDeptIds, ...subDeptIds]));
   const deptNames    = allDeptsSnap.docs.filter(d => allDeptIds.includes(d.id)).map(d => d.data().name as string);
 
   const userSnaps = await Promise.all([

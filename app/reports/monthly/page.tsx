@@ -216,7 +216,7 @@ export default function MonthlyReportPage() {
           if(!dayMap.has(ds))dayMap.set(ds,{recs:[],cis:[]});
           dayMap.get(ds)!.cis.push(c);
         }
-        for(const[ds,day]of dayMap){
+        for(const[ds,day]of Array.from(dayMap)){
           const punches=day.recs.filter(r=>r.type==="punch-in"&&r.status==="approved"&&r.durationMinutes);
           const field=day.recs.find(r=>r.type==="field-day"&&r.status==="approved");
           const abs=day.recs.find(r=>r.type==="absent");
