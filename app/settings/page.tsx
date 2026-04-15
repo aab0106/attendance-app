@@ -18,11 +18,32 @@ export default function SettingsPage() {
   const [currentLock, setCurrentLock]   = useState<string|null>(null);
   const [lockLoading, setLockLoading]   = useState(false);
   const [migrating, setMigrating]       = useState(false);
+  const [runningAbsent, setRunningAbsent] = useState(false);
+  const [absentResult, setAbsentResult]   = useState<any>(null);
   const [migResult, setMigResult]       = useState<MigrationResult|null>(null);
   const [previewData, setPreviewData]   = useState<any[]>([]);
   const [previewing, setPreviewing]     = useState(false);
 
   useEffect(() => { loadLock(); }, []);
+
+  const runAbsentMarkingPortal = async () => {
+    if (!confirm("Run absent marking for today? This will mark all employees who haven\'t punched in as absent or field-day.")) return;
+    setRunningAbsent(true); setAbsentResult(null);
+    try {
+      // Call the same logic via Firestore directly
+      const today = new Date();
+      const dateStr = today.toISOString().split("T")[0];
+      const hour = today.getHours();
+      if (hour < 18 && !confirm("It\'s before 6PM. Run anyway for testing?")) {
+        setRunningAbsent(false); return;
+      }
+      // Import and run
+      const res = await fetch("/api/run-absent", { method: "POST" }).catch(() => null);
+      // If no API route, show instructions
+      setAbsentResult({ manual: true, dateStr });
+    } catch(e: any) { alert(e.message); }
+    finally { setRunningAbsent(false); }
+  };
 
   const loadLock = async () => {
     try {
@@ -160,6 +181,27 @@ export default function SettingsPage() {
             className="bg-red-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-red-700 disabled:bg-gray-300">
             {lockLoading ? "Saving..." : "Set Lock"}
           </button>
+        </div>
+      </div>
+
+      {/* ── Run Absent Marking ── */}
+      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
+        <h2 className="text-base font-bold text-gray-800 mb-1">Run Absent Marking</h2>
+        <p className="text-sm text-gray-500 mb-4">
+          Marks all employees who have not punched in today as absent or field-day.
+          Normally run after 6PM daily. On mobile: Admin screen → Run Absent Marking.
+        </p>
+        <div className="bg-amber-50 border border-amber-100 rounded-xl px-4 py-3 mb-4 text-sm text-amber-700">
+          <p className="font-semibold mb-1">⚠️ Portal trigger not yet available</p>
+          <p>Absent marking must currently be run from the <strong>mobile app</strong> → Admin screen → Run Absent Marking button (after 6PM).</p>
+          <p className="mt-1">Cloud Functions (auto-trigger at 6PM daily) will be added when upgrading to Firebase Blaze plan.</p>
+        </div>
+        <div className="text-sm text-gray-500">
+          <p className="font-semibold text-gray-700 mb-1">What it does:</p>
+          <p>1. Fetches all active employees (approved device OR joining date set)</p>
+          <p>2. Skips blocked users, non-working days, holidays</p>
+          <p>3. Employees with check-ins → Field Day (pending manager approval)</p>
+          <p>4. Employees with no activity → Absent</p>
         </div>
       </div>
 

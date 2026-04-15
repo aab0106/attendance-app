@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { collection, getDocs, query, where, doc, updateDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
+import { getTeamMembersForManager, getDirectorMembers } from "@/lib/team-utils";
 import Modal from "@/components/ui/Modal";
 
 interface AttRecord {
@@ -65,7 +66,6 @@ function OpenSessionModal({ record, type, policy, onClose, onSaved }:{
   record: AttRecord|CheckIn; type:"punch"|"checkin"; policy:Policy|null;
   onClose:()=>void; onSaved:()=>void;
 }) {
-  const { profile } = useAuth();
   const checkInTime = type==="punch" ? (record as AttRecord).punchInTime : (record as CheckIn).checkInTime;
   const policyEndMins = policy ? parseTime(policy.workEndTime) : 18*60;
   const inD = checkInTime?.toDate ? checkInTime.toDate() : new Date();
@@ -145,7 +145,7 @@ function OpenSessionModal({ record, type, policy, onClose, onSaved }:{
 }
 
 export default function MonthlyReportPage() {
-  const { isAdmin, isManager, isDirector } = useAuth();
+  const { isAdmin, isManager, isDirector, user, profile } = useAuth();
   const [month, setMonth]           = useState(()=>new Date().toISOString().slice(0,7));
   const [depts, setDepts]           = useState<Department[]>([]);
   const [allUsers, setAllUsers]     = useState<UserRecord[]>([]);
@@ -158,7 +158,18 @@ export default function MonthlyReportPage() {
   const [detailUser, setDetailUser]   = useState<UserRecord|null>(null);
   const [detailPolicy, setDetailPolicy] = useState<Policy|null>(null);
   const [loading, setLoading]         = useState(false);
+  const [scopedIds, setScopedIds]     = useState<Set<string>|null>(null);
   const [openModal, setOpenModal]     = useState<{record:any;type:"punch"|"checkin";policy:Policy|null}|null>(null);
+
+  useEffect(()=>{
+    if(!user) return;
+    if(isAdmin){setScopedIds(null);return;}
+    const load=async()=>{
+      const members=isDirector?await getDirectorMembers(user.uid,db):await getTeamMembersForManager(user.uid,db);
+      setScopedIds(new Set(members.map((m:any)=>m.id)));
+    };
+    load();
+  },[user,isAdmin,isDirector]);
 
   useEffect(()=>{
     Promise.all([
@@ -179,8 +190,13 @@ export default function MonthlyReportPage() {
   };
 
   const filteredUsers = allUsers.filter(u=>{
-    if(filterDept && u.department!==filterDept) return false;
     if(filterUser && u.id!==filterUser) return false;
+    if(filterDept){
+      // Include users in this dept AND sub-departments
+      const subDeptIds = depts.filter(d=>d.parentDeptId===filterDept).map(d=>d.id);
+      const allDeptIds = [filterDept, ...subDeptIds];
+      if(!allDeptIds.includes(u.department??'')) return false;
+    }
     return true;
   });
 
@@ -190,7 +206,13 @@ export default function MonthlyReportPage() {
       const [year,mon]=month.split("-").map(Number);
       const start=new Date(year,mon-1,1);
       const end=new Date(year,mon,1);
-      const targetUsers=filteredUsers.length>0?filteredUsers:allUsers;
+      // Apply role scope — director/manager only sees their dept members
+      const scopeFilteredUsers = scopedIds===null
+        ? allUsers
+        : allUsers.filter(u=>scopedIds.has(u.id));
+      const targetUsers=filteredUsers.length>0
+        ? filteredUsers.filter(u=>scopedIds===null||scopedIds.has(u.id))
+        : scopeFilteredUsers;
 
       const [attSnap,ciSnap]=await Promise.all([
         getDocs(query(collection(db,"attendance"),where("timestamp",">=",start),where("timestamp","<",end))),
@@ -388,7 +410,9 @@ export default function MonthlyReportPage() {
       <div className="flex justify-between items-start mb-6">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Monthly Report</h1>
-          <p className="text-gray-500 text-sm mt-1">Select employee for detailed view with check-in breakdown</p>
+          <p className="text-gray-500 text-sm mt-1">
+            {isAdmin?"All employees":isDirector?"Your departments":"Your team"} · select employee for detail view
+          </p>
         </div>
         <div className="flex gap-2">
           <button onClick={exportCSV} className="bg-green-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-green-700">CSV ↓</button>

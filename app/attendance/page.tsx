@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { collection, getDocs, query, where } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
+import { getTeamMembersForManager, getDirectorMembers } from "@/lib/team-utils";
 
 interface AttendanceRecord {
   id: string;
@@ -50,7 +51,8 @@ const statusBadge = (status: string) => {
 };
 
 export default function AttendancePage() {
-  const { isAdmin, isManager } = useAuth();
+  const { isAdmin, isManager, isDirector, user } = useAuth();
+  const [scopedIds, setScopedIds] = useState<Set<string>|null>(null);
   const [attendance, setAttendance] = useState<AttendanceRecord[]>([]);
   const [checkins, setCheckins]     = useState<CheckInRecord[]>([]);
   const [loading, setLoading]       = useState(true);
@@ -59,6 +61,16 @@ export default function AttendancePage() {
   const [filterStatus, setFilterStatus] = useState("");
 
   const today = new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD
+
+  useEffect(()=>{
+    if(!user) return;
+    if(isAdmin){setScopedIds(null);return;}
+    const load=async()=>{
+      const members=isDirector?await getDirectorMembers(user.uid,db):await getTeamMembersForManager(user.uid,db);
+      setScopedIds(new Set(members.map((m:any)=>m.id)));
+    };
+    load();
+  },[user,isAdmin,isDirector]);
 
   useEffect(() => { loadData(); }, []);
 
@@ -70,8 +82,11 @@ export default function AttendancePage() {
         getDocs(query(collection(db, "attendance"), where("timestamp", ">=", startOfDay))),
         getDocs(query(collection(db, "checkins"), where("timestamp", ">=", startOfDay))),
       ]);
-      setAttendance(attSnap.docs.map(d => ({ id: d.id, ...d.data() } as AttendanceRecord)));
-      setCheckins(ciSnap.docs.map(d => ({ id: d.id, ...d.data() } as CheckInRecord)));
+      const allAtt = attSnap.docs.map(d => ({ id: d.id, ...d.data() } as AttendanceRecord));
+      const allCI  = ciSnap.docs.map(d => ({ id: d.id, ...d.data() } as CheckInRecord));
+      // Apply role scope
+      setAttendance(scopedIds===null ? allAtt : allAtt.filter(r=>scopedIds.has(r.userId)));
+      setCheckins(scopedIds===null ? allCI : allCI.filter(r=>scopedIds.has(r.userId)));
     } finally { setLoading(false); }
   };
 

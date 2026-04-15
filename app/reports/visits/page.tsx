@@ -1,6 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
 import { collection, getDocs, query, where } from "firebase/firestore";
+import { useAuth } from "@/lib/auth-context";
+import { getTeamMembersForManager, getDirectorMembers } from "@/lib/team-utils";
 import { db } from "@/lib/firebase";
 
 interface Visit {
@@ -126,9 +128,20 @@ export default function VisitReportPage() {
   const [month, setMonth]   = useState(() => new Date().toISOString().slice(0,7));
   const [data, setData]     = useState<Visit[]>([]);
   const [loading, setLoading] = useState(false);
+  const { isAdmin, isDirector, user } = useAuth();
+  const [scopedIds, setScopedIds] = useState<Set<string>|null>(null);
   const [filter, setFilter] = useState<"all"|"outer-visit"|"other-site">("all");
   const [search, setSearch] = useState("");
 
+  useEffect(()=>{
+    if(!user) return;
+    if(isAdmin){setScopedIds(null);return;}
+    const load=async()=>{
+      const members=isDirector?await getDirectorMembers(user.uid,db):await getTeamMembersForManager(user.uid,db);
+      setScopedIds(new Set(members.map((m:any)=>m.id)));
+    };
+    load();
+  },[user,isAdmin,isDirector]);
   useEffect(() => { loadData(); }, [month]);
 
   const loadData = async () => {
@@ -157,7 +170,8 @@ export default function VisitReportPage() {
         } catch {}
       }));
       // Apply real names
-      const enriched = visits.map(v=>({...v, userName: userMap.get(v.userId) ?? v.userName}));
+      const allEnriched = visits.map(v=>({...v, userName: userMap.get(v.userId) ?? v.userName}));
+      const enriched = allEnriched.filter(v => scopedIds===null || scopedIds.has(v.userId));
       setData(enriched);
     } finally { setLoading(false); }
   };
@@ -201,7 +215,9 @@ export default function VisitReportPage() {
       <div className="flex justify-between items-start mb-6">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Visit Report</h1>
-          <p className="text-gray-500 text-sm mt-1">Outer visits and other site check-ins — grouped by employee</p>
+          <p className="text-gray-500 text-sm mt-1">
+            {isAdmin?"All employees":isDirector?"Your departments":"Your team"} · grouped by employee
+          </p>
         </div>
         <button onClick={exportCSV}
           className="bg-green-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-green-700">

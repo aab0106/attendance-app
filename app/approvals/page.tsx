@@ -6,6 +6,7 @@ import {
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
+import { getTeamMembersForManager, getDirectorMembers } from "@/lib/team-utils";
 
 interface AttRecord {
   id: string; userId: string; userName: string; type: string;
@@ -157,7 +158,6 @@ export default function ApprovalsPage() {
     if (!user) return;
     if (isAdmin) { setDeptMembers([]); return; } // admin sees all
 
-    const { getTeamMembersForManager, getDirectorMembers } = await import("@/lib/team-utils");
     const members = isDirector
       ? await getDirectorMembers(user.uid, db)
       : await getTeamMembersForManager(user.uid, db);
