@@ -66,6 +66,7 @@ function OpenSessionModal({ record, type, policy, onClose, onSaved }:{
   record: AttRecord|CheckIn; type:"punch"|"checkin"; policy:Policy|null;
   onClose:()=>void; onSaved:()=>void;
 }) {
+  const { profile } = useAuth();
   const checkInTime = type==="punch" ? (record as AttRecord).punchInTime : (record as CheckIn).checkInTime;
   const policyEndMins = policy ? parseTime(policy.workEndTime) : 18*60;
   const inD = checkInTime?.toDate ? checkInTime.toDate() : new Date();
