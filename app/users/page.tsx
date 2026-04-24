@@ -1,4 +1,5 @@
 "use client";
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { collection, getDocs, doc, updateDoc, addDoc, serverTimestamp, query, where } from "firebase/firestore";
 import { createUserWithEmailAndPassword, getAuth, sendPasswordResetEmail } from "firebase/auth";
@@ -19,7 +20,7 @@ const getSecondaryAuth = () => {
 interface UserRecord {
   id: string; email: string; name?: string;
   role: string | string[]; department?: string;
-  designation?: string; employeeId?: string;
+  designation?: string; employeeId?: string; employeeType?: "office" | "field";
   blocked?: boolean;
   device?: { deviceId?: string; approved?: boolean };
 }
@@ -45,6 +46,7 @@ function EditUserModal({ user, deptList, onClose, onSaved }: {
   const [employeeId, setEmpId]    = useState(user.employeeId ?? "");
   const [roles, setRoles]         = useState<string[]>(getRoles(user));
   const [joiningDate, setJoining] = useState<string>((user as any).joiningDate ?? "");
+  const [empType, setEmpType]     = useState<"office"|"field">((user as any).employeeType ?? "office");
   const [saving, setSaving]       = useState(false);
   const [error, setError]         = useState("");
 
@@ -60,6 +62,8 @@ function EditUserModal({ user, deptList, onClose, onSaved }: {
         name:        name.trim(),
         department:  dept || null,
         designation: designation.trim() || null,
+        employeeType: empType,
+        joiningDate: joiningDate || null,
         employeeId:  employeeId.trim() || null,
         role:        roles.length === 1 ? roles[0] : roles,
         updatedAt:   serverTimestamp(),
@@ -117,6 +121,20 @@ function EditUserModal({ user, deptList, onClose, onSaved }: {
             ))}
           </div>
           <p className="text-xs text-gray-400 mt-1">Select all that apply</p>
+        </div>
+
+        {/* Employee Type */}
+        <div>
+          <label className="block text-sm font-semibold text-gray-600 mb-2">Employee Type</label>
+          <div className="flex gap-3">
+            {([["office","🏢 Office Staff"],["field","🚗 Field Staff"]] as [string,string][]).map(([v,l])=>(
+              <button key={v} type="button" onClick={()=>setEmpType(v as "office"|"field")}
+                className={`flex-1 px-4 py-3 rounded-xl text-sm font-semibold border transition-colors ${empType===v?"bg-blue-600 text-white border-blue-600":"border-gray-200 text-gray-600 hover:bg-gray-50"}`}>
+                {l}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-gray-400 mt-1">Field staff: travel time credited, auto-approved check-ins, measured by daily hours target</p>
         </div>
 
         {error && <p className="text-red-600 text-xs bg-red-50 rounded-lg px-3 py-2">{error}</p>}
@@ -205,6 +223,9 @@ They will be logged out and must register their device again on next login.`)) r
             </div>
             {user.employeeId && <p className="text-xs text-blue-500 font-mono">{user.employeeId}</p>}
             {user.designation && <p className="text-xs text-gray-500 italic">{user.designation}</p>}
+            {(user as any).employeeType === "field" && (
+              <span className="text-xs font-bold bg-green-100 text-green-700 px-2 py-0.5 rounded-full">🚗 Field Staff</span>
+            )}
             <p className="text-xs text-gray-400">{user.email}</p>
           </div>
         </td>
@@ -292,6 +313,7 @@ function AddUserModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =
   const [dept, setDept]           = useState("");
   const [designation, setDesig]   = useState("");
   const [employeeId, setEmpId]    = useState("");
+  const [empType, setEmpType]     = useState<"office"|"field">("office");
   const [roles, setRoles]         = useState<string[]>(["employee"]);
   const [joiningDate, setJoining] = useState(() => new Date().toISOString().split("T")[0]);
   const [saving, setSaving]       = useState(false);
@@ -324,6 +346,7 @@ function AddUserModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =
         role:        roles.length === 1 ? roles[0] : roles,
         department:  dept || null,
         designation: designation.trim() || null,
+        employeeType: empType,
         employeeId:  employeeId.trim() || null,
         blocked:     false,
         device:      { deviceId: null, approved: false },
@@ -398,6 +421,20 @@ function AddUserModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =
 
         <div className="bg-amber-50 border border-amber-100 rounded-xl px-4 py-3 text-xs text-amber-700">
           ⚠️ After creation the employee logs in on the mobile app to register their device. You then approve the device from the Pending tab.
+        </div>
+
+        {/* Employee Type */}
+        <div>
+          <label className="block text-sm font-semibold text-gray-600 mb-2">Employee Type</label>
+          <div className="flex gap-3">
+            {([["office","🏢 Office Staff"],["field","🚗 Field Staff"]] as [string,string][]).map(([v,l])=>(
+              <button key={v} type="button" onClick={()=>setEmpType(v as "office"|"field")}
+                className={`flex-1 px-4 py-3 rounded-xl text-sm font-semibold border transition-colors ${empType===v?"bg-blue-600 text-white border-blue-600":"border-gray-200 text-gray-600 hover:bg-gray-50"}`}>
+                {l}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-gray-400 mt-1">Field staff: travel time credited, auto-approved check-ins, measured by daily hours target</p>
         </div>
 
         {error && <p className="text-red-600 text-xs bg-red-50 rounded-lg px-3 py-2">{error}</p>}

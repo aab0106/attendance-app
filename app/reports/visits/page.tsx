@@ -157,9 +157,9 @@ export default function VisitReportPage() {
       ));
       const visits = snap.docs.map(d=>({id:d.id,...d.data()} as Visit));
       // Enrich with actual user names from users collection
-      const userIds = Array.from(new Set(visits.map(v=>v.userId)));
+      const userIds: string[] = Array.from(new Set(visits.map(v=>v.userId))) as string[];
       const userMap = new Map<string,string>();
-      await Promise.all(userIds.map(async uid => {
+      await Promise.all(userIds.map(async (uid: string) => {
         try {
           const { doc: firestoreDoc, getDoc } = await import("firebase/firestore");
           const uSnap = await getDoc(firestoreDoc(db,"users",uid));

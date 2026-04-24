@@ -74,8 +74,17 @@ export default function LateReportPage(){
   const [filter,setFilter]=useState<"all"|"pending"|"excused"|"unexcused">("all");
   const [search,setSearch]=useState("");
   const [scopedIds,setScopedIds]=useState<Set<string>|null>(null);
+  const [deptMap,setDeptMap]=useState<Map<string,string>>(new Map());
 
-  useEffect(()=>{ getDocs(collection(db,"users")).then(snap=>{const m=new Map();snap.docs.forEach(d=>m.set(d.id,d.data()));setUserMap(m);}); },[]);
+  useEffect(()=>{
+    Promise.all([
+      getDocs(collection(db,"users")),
+      getDocs(query(collection(db,"departments"),where("active","==",true))),
+    ]).then(([uSnap,dSnap])=>{
+      const um=new Map(); uSnap.docs.forEach(d=>um.set(d.id,d.data())); setUserMap(um);
+      const dm=new Map(); dSnap.docs.forEach(d=>dm.set(d.id,(d.data() as any).name)); setDeptMap(dm);
+    });
+  },[]);
 
   useEffect(()=>{
     if(!user) return;
@@ -124,9 +133,10 @@ export default function LateReportPage(){
 
   const exportCSV=()=>{
     const headers=["Date","Employee","Dept","Punch In","Late By (min)","Status","Reason","Reviewed By"];
-    const rows=tabFiltered.map(r=>[fmtDate(r.punchInTime,r.dateStr),r.userName,r.department??"—",fmtTime(r.punchInTime),r.lateMinutes,statusLabel(r.lateApproved),r.lateReason??"—",r.lateReviewedBy??"—"]);
+    const rows=tabFiltered.map(r=>[fmtDate(r.punchInTime,r.dateStr),r.userName,deptMap.get(r.department??"")||"-",fmtTime(r.punchInTime),r.lateMinutes,statusLabel(r.lateApproved),r.lateReason||"-",r.lateReviewedBy||"-"]);
     const csv=[headers,...rows].map(r=>r.map(x=>'"'+String(x).replace(/"/g,'""')+'"').join(",")).join("\n");
-    const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download=`late_${month}.csv`;a.click();
+    const bom="\uFEFF"; // UTF-8 BOM for Excel
+    const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([bom+csv],{type:"text/csv;charset=utf-8"}));a.download=`late_${month}.csv`;a.click();
   };
 
   const scopeLabel=isAdmin?"All employees":isDirector?"Your departments":"Your team";

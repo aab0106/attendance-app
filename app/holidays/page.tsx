@@ -169,7 +169,7 @@ export default function HolidaysPage() {
         </button>
         <button onClick={() => setTab("notifications")}
           className={`px-5 py-2.5 rounded-xl text-sm font-semibold transition-colors ${tab==="notifications"?"bg-blue-600 text-white":"bg-white border border-gray-200 text-gray-600 hover:bg-gray-50"}`}>
-          🔔 Sent Notifications ({notifications.length})
+          🔔 Sent Notifications ({Object.keys(notifications.reduce((g:any,n:any)=>{const k=n.broadcastId??n.id;if(!g[k])g[k]=1;return g;},{})).length})
         </button>
       </div>
 
@@ -243,7 +243,16 @@ export default function HolidaysPage() {
             </div>
           ) : (
             <div className="space-y-3">
-              {notifications.map(n => (
+              {Object.values(notifications.reduce((groups:any, n:any) => {
+                // Group by broadcastId (new) OR by title+date (old records without broadcastId)
+                const dateKey = n.timestamp?.toDate
+                  ? n.timestamp.toDate().toISOString().slice(0,13) // group by title+hour
+                  : "unknown";
+                const key = n.broadcastId ?? (n.title + "_" + dateKey);
+                if (!groups[key]) groups[key] = {...n, _count: 0};
+                groups[key]._count++;
+                return groups;
+              }, {})).map((n:any) => (
                 <div key={n.id} className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4 flex gap-3">
                   <div className="w-9 h-9 bg-blue-100 rounded-xl flex items-center justify-center text-lg flex-shrink-0">
                     {n.type==="holiday"?"🏖️":"📢"}
@@ -251,11 +260,11 @@ export default function HolidaysPage() {
                   <div className="flex-1 min-w-0">
                     <p className="font-semibold text-sm text-gray-800">{n.title}</p>
                     <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{n.body}</p>
-                    <p className="text-xs text-gray-300 mt-1">{fmtTs(n.timestamp)} · {n.toUserId?"Individual":"Broadcast"}</p>
+                    <p className="text-xs text-gray-300 mt-1">{fmtTs(n.timestamp)} · Sent to {n.recipientCount ?? n._count ?? 1} employee{(n.recipientCount??n._count??1)!==1?"s":""}</p>
                   </div>
                 </div>
               ))}
-              <p className="text-xs text-gray-400 text-center pt-2">Showing notifications sent by you. Each recipient gets their own copy.</p>
+              <p className="text-xs text-gray-400 text-center pt-2">Each row = one announcement. Showing unique broadcasts sent by you.</p>
             </div>
           )}
         </>

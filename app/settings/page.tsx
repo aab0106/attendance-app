@@ -1,4 +1,5 @@
 "use client";
+import { runBulkAbsentBackfill } from "@/lib/absentBackfill";
 import { useEffect, useState } from "react";
 import {
   collection, getDocs, doc, updateDoc, getDoc,
@@ -18,13 +19,133 @@ export default function SettingsPage() {
   const [currentLock, setCurrentLock]   = useState<string|null>(null);
   const [lockLoading, setLockLoading]   = useState(false);
   const [migrating, setMigrating]       = useState(false);
-  const [runningAbsent, setRunningAbsent] = useState(false);
-  const [absentResult, setAbsentResult]   = useState<any>(null);
+  const [runningAbsent, setRunningAbsent]   = useState(false);
+  const [absentResult, setAbsentResult]     = useState<any>(null);
+  const [cleaningAbsent, setCleaningAbsent]   = useState(false);
+  const [cleanupResult, setCleanupResult]     = useState<any>(null);
+  const [runningBackfill, setRunningBackfill] = useState(false);
+  const [backfillResult, setBackfillResult]   = useState<any>(null);
+  const [backfillFrom, setBackfillFrom]       = useState("");
+  const [backfillTo, setBackfillTo]           = useState("");
+  const [cleaningToday, setCleaningToday]     = useState(false);
+  const [cleanResult, setCleanResult]         = useState<any>(null);
   const [migResult, setMigResult]       = useState<MigrationResult|null>(null);
   const [previewData, setPreviewData]   = useState<any[]>([]);
   const [previewing, setPreviewing]     = useState(false);
 
   useEffect(() => { loadLock(); }, []);
+
+  const cleanupTodayAbsent = async () => {
+    if (!confirm("This will delete ALL absent records with today\'s date from Firestore. Use this only to fix stale bad data from previous buggy runs. Continue?")) return;
+    setCleaningToday(true); setCleanResult(null);
+    try {
+      const { collection, getDocs, query, where, deleteDoc, doc } = await import("firebase/firestore");
+      const { db } = await import("@/lib/firebase");
+      const d = new Date();
+      const todayStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+      const snap = await getDocs(query(
+        collection(db,"attendance"),
+        where("type","==","absent"),
+        where("dateStr","==",todayStr)
+      ));
+      let deleted = 0;
+      for (const docSnap of snap.docs) {
+        await deleteDoc(doc(db,"attendance",docSnap.id));
+        deleted++;
+      }
+      setCleanResult({ deleted, dateStr: todayStr });
+    } catch(e:any) {
+      setCleanResult({ error: e.message });
+    } finally { setCleaningToday(false); }
+  };
+
+  const [absentInspect, setAbsentInspect] = useState<any>(null);
+
+  const inspectAbsent = async () => {
+    const { collection, getDocs, query, where } = await import("firebase/firestore");
+    const { db } = await import("@/lib/firebase");
+    const snap = await getDocs(query(collection(db,"attendance"), where("type","==","absent")));
+    const todayStr = (() => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; })();
+    const records = snap.docs.map(d => {
+      const x = d.data() as any;
+      let createdDate = "—";
+      if (x.timestamp?.toDate) {
+        const t = x.timestamp.toDate();
+        createdDate = `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")} ${String(t.getHours()).padStart(2,"0")}:${String(t.getMinutes()).padStart(2,"0")}`;
+      }
+      return { id: d.id, userName: x.userName, dateStr: x.dateStr ?? "(no dateStr)", createdAt: createdDate };
+    });
+    setAbsentInspect({ count: records.length, records, todayStr });
+  };
+
+  const deleteAllAbsent = async () => {
+    if (!confirm("⚠️ This will DELETE ALL absent records in Firestore. Are you sure?")) return;
+    if (!confirm("⚠️ Second confirmation — this is irreversible. Really delete all absent records?")) return;
+    const { collection, getDocs, query, where, doc, deleteDoc } = await import("firebase/firestore");
+    const { db } = await import("@/lib/firebase");
+    const snap = await getDocs(query(collection(db,"attendance"), where("type","==","absent")));
+    let deleted = 0;
+    for (const d of snap.docs) {
+      await deleteDoc(doc(db,"attendance",d.id));
+      deleted++;
+    }
+    alert(`Deleted ${deleted} absent records.`);
+    setAbsentInspect(null);
+  };
+
+  const cleanStaleAbsent = async () => {
+    if (!confirm("This will scan all absent records and delete:\n1. Absent records for TODAY (shouldn't exist)\n2. Absent records for any day where the same user has a punch-in (duplicates)\n\nContinue?")) return;
+    setCleaningAbsent(true); setCleanupResult(null);
+    try {
+      const { collection, getDocs, query, where, doc, deleteDoc } = await import("firebase/firestore");
+      const { db } = await import("@/lib/firebase");
+      const todayStr = (() => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; })();
+
+      // Get all absent records
+      const absSnap = await getDocs(query(collection(db,"attendance"), where("type","==","absent")));
+      const absents = absSnap.docs.map(d => ({ id:d.id, ...d.data() } as any));
+
+      // Get all punch-ins
+      const piSnap = await getDocs(query(collection(db,"attendance"), where("type","==","punch-in")));
+      const punchKeys = new Set<string>();
+      piSnap.docs.forEach(d => {
+        const x = d.data() as any;
+        let ds = x.dateStr;
+        if (!ds && x.timestamp?.toDate) {
+          const t = x.timestamp.toDate();
+          ds = `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`;
+        }
+        if (ds) punchKeys.add(`${x.userId}_${ds}`);
+      });
+
+      let deletedToday = 0, deletedDup = 0;
+      for (const a of absents) {
+        const key = `${a.userId}_${a.dateStr}`;
+        if (a.dateStr === todayStr) {
+          await deleteDoc(doc(db,"attendance",a.id));
+          deletedToday++;
+        } else if (punchKeys.has(key)) {
+          await deleteDoc(doc(db,"attendance",a.id));
+          deletedDup++;
+        }
+      }
+      setCleanupResult({ deletedToday, deletedDup, scanned: absents.length });
+    } catch(e:any) {
+      setCleanupResult({ error: e.message });
+    } finally { setCleaningAbsent(false); }
+  };
+
+  const runBackfill = async () => {
+    if (!backfillFrom || !backfillTo) { alert("Select both From and To dates."); return; }
+    if (!confirm(`This will mark absent for ALL employees for every working day from ${backfillFrom} to ${backfillTo} that has no attendance record. Continue?`)) return;
+    setRunningBackfill(true); setBackfillResult(null);
+    try {
+      const res = await runBulkAbsentBackfill(backfillFrom, backfillTo);
+      setBackfillResult(res);
+    } catch(e:any) {
+      setBackfillResult({ error: e.message });
+    } finally { setRunningBackfill(false); }
+  };
 
   const runAbsentMarkingPortal = async () => {
     if (!confirm("Run absent marking for today? This will mark all employees who haven\'t punched in as absent or field-day.")) return;
@@ -203,6 +324,110 @@ export default function SettingsPage() {
           <p>3. Employees with check-ins → Field Day (pending manager approval)</p>
           <p>4. Employees with no activity → Absent</p>
         </div>
+      </div>
+
+      {/* ── Cleanup Today's Absent Records ── */}
+      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
+        <h2 className="text-base font-bold text-gray-800 mb-1">🧹 Cleanup Today's Absent Records</h2>
+        <p className="text-sm text-gray-500 mb-4">
+          One-time fix: deletes all absent records with today's date. Use this if previous buggy absent marking runs wrote today's date into Firestore. Safe — only removes absent records for the current date.
+        </p>
+        <div className="flex gap-3 items-center">
+          <button onClick={cleanupTodayAbsent} disabled={cleaningToday}
+            className="bg-red-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-red-700 disabled:bg-gray-300">
+            {cleaningToday ? "Cleaning..." : "Delete today\'s absent records"}
+          </button>
+          {cleanResult && (
+            <div className={`text-sm font-semibold ${cleanResult.error?"text-red-600":"text-green-600"}`}>
+              {cleanResult.error ? `Error: ${cleanResult.error}` : `✓ Deleted ${cleanResult.deleted} absent record(s) for ${cleanResult.dateStr}`}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Inspect Absent Records ── */}
+      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
+        <h2 className="text-base font-bold text-gray-800 mb-1">Inspect Absent Records</h2>
+        <p className="text-sm text-gray-500 mb-4">
+          Shows every absent record in Firestore with its dateStr and creation time.
+          Use this to see what the buggy runs actually wrote.
+        </p>
+        <div className="flex gap-3">
+          <button onClick={inspectAbsent} className="bg-blue-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-blue-700">
+            🔍 Inspect All Absent Records
+          </button>
+          <button onClick={deleteAllAbsent} className="bg-red-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-red-700">
+            ⚠️ Delete ALL Absent Records
+          </button>
+        </div>
+        {absentInspect && (
+          <div className="mt-4 bg-gray-50 rounded-xl p-4 text-xs max-h-96 overflow-y-auto">
+            <p className="font-bold mb-2">Found {absentInspect.count} absent records. Today = {absentInspect.todayStr}</p>
+            <table className="w-full">
+              <thead><tr className="text-left text-gray-600 border-b"><th className="pb-2">Employee</th><th>Date (dateStr)</th><th>Created At</th></tr></thead>
+              <tbody>
+                {absentInspect.records.map((r:any)=>(
+                  <tr key={r.id} className={`border-b border-gray-200 ${r.dateStr===absentInspect.todayStr?"bg-red-100":""}`}>
+                    <td className="py-1">{r.userName}</td>
+                    <td className={r.dateStr===absentInspect.todayStr?"text-red-700 font-bold":""}>{r.dateStr}</td>
+                    <td className="text-gray-500">{r.createdAt}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* ── Clean Stale Absent Records ── */}
+      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
+        <h2 className="text-base font-bold text-gray-800 mb-1">Clean Stale Absent Records</h2>
+        <p className="text-sm text-gray-500 mb-4">
+          Deletes absent records that shouldn't exist: (1) any absent record for today (ongoing day),
+          and (2) any absent record where the same user also has a punch-in on the same day.
+          Use this to fix bad data from earlier buggy runs.
+        </p>
+        <button onClick={cleanStaleAbsent} disabled={cleaningAbsent}
+          className="bg-red-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-red-700 disabled:bg-gray-300">
+          {cleaningAbsent ? "Cleaning..." : "🗑️ Clean Stale Absent Records"}
+        </button>
+        {cleanupResult && (
+          <div className={`mt-4 rounded-xl px-4 py-3 text-sm ${cleanupResult.error?"bg-red-50 text-red-700":"bg-green-50 text-green-700"}`}>
+            {cleanupResult.error ? `Error: ${cleanupResult.error}` :
+              `✓ Cleanup done — Scanned ${cleanupResult.scanned} absent records. Deleted ${cleanupResult.deletedToday} for today + ${cleanupResult.deletedDup} duplicates with punch-ins.`}
+          </div>
+        )}
+      </div>
+
+      {/* ── Bulk Absent Back-fill ── */}
+      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
+        <h2 className="text-base font-bold text-gray-800 mb-1">Bulk Absent Back-fill</h2>
+        <p className="text-sm text-gray-500 mb-4">
+          Mark absent for all employees across a date range — for days with no attendance record.
+          Use this to fix historical data. Skips weekends, holidays, and days that already have records.
+        </p>
+        <div className="flex gap-3 mb-4 flex-wrap items-end">
+          <div>
+            <label className="block text-xs font-semibold text-gray-500 mb-1.5">From Date</label>
+            <input type="date" value={backfillFrom} onChange={e=>setBackfillFrom(e.target.value)}
+              className="border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-gray-500 mb-1.5">To Date</label>
+            <input type="date" value={backfillTo} onChange={e=>setBackfillTo(e.target.value)}
+              className="border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+          </div>
+          <button onClick={runBackfill} disabled={runningBackfill||!backfillFrom||!backfillTo}
+            className="bg-orange-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-orange-700 disabled:bg-gray-300">
+            {runningBackfill ? "Running..." : "Run Back-fill"}
+          </button>
+        </div>
+        {backfillResult && (
+          <div className={`rounded-xl px-4 py-3 text-sm ${backfillResult.error?"bg-red-50 text-red-700":"bg-green-50 text-green-700"}`}>
+            {backfillResult.error ? `Error: ${backfillResult.error}` :
+              `✓ Done — ${backfillResult.totalMarked} absent records created, ${backfillResult.totalSkipped} days already had records, ${backfillResult.datesProcessed} dates processed.`}
+          </div>
+        )}
       </div>
 
       {/* ── Department Migration Tool ── */}

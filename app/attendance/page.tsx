@@ -22,6 +22,12 @@ interface AttendanceRecord {
   department?: string;
 }
 
+interface LeaveRecord {
+  id: string; userId: string; userName: string; department?: string;
+  leaveType: string; leaveLabel?: string; fromDate: string; toDate: string;
+  days: number; reason: string; status: string;
+}
+
 interface CheckInRecord {
   id: string;
   userId: string;
@@ -56,11 +62,15 @@ export default function AttendancePage() {
   const [attendance, setAttendance] = useState<AttendanceRecord[]>([]);
   const [checkins, setCheckins]     = useState<CheckInRecord[]>([]);
   const [loading, setLoading]       = useState(true);
-  const [tab, setTab]               = useState<"attendance"|"checkins">("attendance");
+  const [tab, setTab]               = useState<"attendance"|"checkins"|"leaves">("attendance");
+  const [todayLeaves, setTodayLeaves] = useState<LeaveRecord[]>([]);
   const [search, setSearch]         = useState("");
   const [filterStatus, setFilterStatus] = useState("");
 
-  const today = new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD
+  const todayStr = (() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  })();
 
   useEffect(()=>{
     if(!user) return;
@@ -78,15 +88,36 @@ export default function AttendancePage() {
     setLoading(true);
     try {
       const startOfDay = new Date(); startOfDay.setHours(0,0,0,0);
-      const [attSnap, ciSnap] = await Promise.all([
+      const todayDateStr = (() => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; })();
+
+      // Attendance: punch-ins via timestamp, absent/field-day via dateStr
+      const [attTsSnap, attDsSnap, ciSnap, leaveSnap] = await Promise.all([
         getDocs(query(collection(db, "attendance"), where("timestamp", ">=", startOfDay))),
+        getDocs(query(collection(db, "attendance"), where("dateStr", "==", todayDateStr))),
         getDocs(query(collection(db, "checkins"), where("timestamp", ">=", startOfDay))),
+        getDocs(query(collection(db, "leaves"), where("status", "==", "approved"))),
       ]);
-      const allAtt = attSnap.docs.map(d => ({ id: d.id, ...d.data() } as AttendanceRecord));
+
+      const allLeaves = leaveSnap.docs.map(d=>({id:d.id,...d.data()} as LeaveRecord))
+        .filter(l => l.fromDate <= todayDateStr && l.toDate >= todayDateStr);
+
+      // Merge: punch-ins from timestamp query + absent/field-day from dateStr query
+      const seen = new Set<string>();
+      const allAtt: AttendanceRecord[] = [];
+      attTsSnap.docs.forEach(d => {
+        const r = d.data() as any;
+        if (r.type !== "absent" && r.type !== "field-day") {
+          if(!seen.has(d.id)){seen.add(d.id); allAtt.push({id:d.id, ...r} as AttendanceRecord);}
+        }
+      });
+      attDsSnap.docs.forEach(d => {
+        if(!seen.has(d.id)){seen.add(d.id); allAtt.push({id:d.id, ...d.data()} as AttendanceRecord);}
+      });
       const allCI  = ciSnap.docs.map(d => ({ id: d.id, ...d.data() } as CheckInRecord));
       // Apply role scope
       setAttendance(scopedIds===null ? allAtt : allAtt.filter(r=>scopedIds.has(r.userId)));
       setCheckins(scopedIds===null ? allCI : allCI.filter(r=>scopedIds.has(r.userId)));
+      setTodayLeaves(scopedIds===null ? allLeaves : allLeaves.filter(l=>scopedIds.has(l.userId)));
     } finally { setLoading(false); }
   };
 
@@ -102,6 +133,7 @@ export default function AttendancePage() {
     return !q || c.userName.toLowerCase().includes(q);
   });
 
+  const onLeave    = todayLeaves.length;
   const present    = attendance.filter(a => a.type === "punch-in").length;
   const absent     = attendance.filter(a => a.type === "absent").length;
   const fieldDays  = attendance.filter(a => a.type === "field-day").length;
@@ -121,13 +153,14 @@ export default function AttendancePage() {
       </div>
 
       {/* Summary */}
-      <div className="grid grid-cols-5 gap-3 mb-6">
+      <div className="grid grid-cols-6 gap-3 mb-6">
         {[
           { label:"Present",   value:present,   color:"bg-green-100 text-green-700" },
           { label:"Absent",    value:absent,     color:"bg-red-100 text-red-700" },
           { label:"Field Day", value:fieldDays,  color:"bg-blue-100 text-blue-700" },
           { label:"Late",      value:lateCount,  color:"bg-orange-100 text-orange-700" },
           { label:"Out Now",   value:activeCI,   color:"bg-purple-100 text-purple-700" },
+          { label:"On Leave",  value:onLeave,    color:"bg-teal-100 text-teal-700" },
         ].map(s => (
           <div key={s.label} className={`${s.color} rounded-xl p-3 text-center`}>
             <p className="text-2xl font-bold">{s.value}</p>
@@ -138,12 +171,12 @@ export default function AttendancePage() {
 
       {/* Tabs */}
       <div className="flex gap-2 mb-4">
-        {(["attendance","checkins"] as const).map(t => (
+        {(["attendance","checkins","leaves"] as const).map(t => (
           <button key={t} onClick={() => setTab(t)}
             className={`px-5 py-2 rounded-xl text-sm font-semibold capitalize transition-colors ${
               tab===t ? "bg-blue-600 text-white" : "bg-white border border-gray-200 text-gray-600 hover:bg-gray-50"
             }`}>
-            {t==="attendance" ? `Attendance (${attendance.length})` : `Check-ins (${checkins.length})`}
+            {t==="attendance" ? `Attendance (${attendance.length})` : t==="checkins" ? `Check-ins (${checkins.length})` : `On Leave (${todayLeaves.length})`}
           </button>
         ))}
       </div>
@@ -257,6 +290,40 @@ export default function AttendancePage() {
             </table>
           </div>
         )}
+      {/* Leaves today */}
+      {tab === "leaves" && (
+        <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+          {todayLeaves.length === 0 ? (
+            <div className="p-12 text-center text-gray-400 text-sm">No employees on leave today.</div>
+          ) : (
+            <table className="w-full">
+              <thead>
+                <tr className="bg-gray-50 border-b border-gray-100">
+                  {["Employee","Leave Type","From","To","Days","Reason","Status"].map(h => (
+                    <th key={h} className="px-4 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {todayLeaves.map(l => (
+                  <tr key={l.id} className="border-b border-gray-50 hover:bg-gray-50">
+                    <td className="px-4 py-3">
+                      <p className="text-sm font-semibold text-gray-800">{l.userName}</p>
+                      {l.department && <p className="text-xs text-gray-400">{l.department}</p>}
+                    </td>
+                    <td className="px-4 py-3"><span className="text-xs font-semibold bg-teal-100 text-teal-700 px-2 py-0.5 rounded-full">{l.leaveLabel ?? l.leaveType}</span></td>
+                    <td className="px-4 py-3 text-xs text-gray-600">{l.fromDate}</td>
+                    <td className="px-4 py-3 text-xs text-gray-600">{l.toDate}</td>
+                    <td className="px-4 py-3 text-xs font-bold text-gray-700">{l.days}</td>
+                    <td className="px-4 py-3 text-xs text-gray-500 max-w-xs truncate">{l.reason}</td>
+                    <td className="px-4 py-3"><span className="text-xs font-semibold bg-green-100 text-green-700 px-2 py-0.5 rounded-full">Approved</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
       </div>
     </div>
   );

@@ -69,25 +69,33 @@ function ReasonModal({ action, onConfirm, onCancel }: {
   );
 }
 
-function RecordRow({ record, onAction, isAdmin }: {
-  record: AttRecord; onAction: (r: AttRecord, action: string, reason: string) => Promise<void>; isAdmin: boolean;
+function RecordRow({ record, onAction, isAdmin, onOpenModal, selected, onToggle, canApprove }: {
+  record: AttRecord;
+  onAction: (r: AttRecord, action: string, reason: string) => Promise<void>;
+  isAdmin: boolean;
+  onOpenModal: (action: "approved"|"rejected") => void;
+  selected?: boolean;
+  onToggle?: () => void;
+  canApprove?: boolean;
 }) {
-  const [expanded, setExpanded]   = useState(false);
-  const [modalAction, setModal]   = useState<"approved"|"rejected"|null>(null);
-  const [acting, setActing]       = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [acting, setActing]     = useState(false);
 
   const isPending  = record.status === "pending" || record.status === "absent";
   const isLocked   = record.reversalCount && record.reversalCount >= 1 && !isAdmin;
 
   const handleAction = async (action: string, reason: string) => {
-    setModal(null); setActing(true);
+    setActing(true);
     try { await onAction(record, action, reason); }
     finally { setActing(false); }
   };
 
   return (
     <>
-      <tr className="border-b border-gray-50 hover:bg-gray-50 cursor-pointer" onClick={() => setExpanded(v => !v)}>
+      <tr className={`border-b border-gray-50 hover:bg-gray-50 cursor-pointer ${selected?"bg-blue-50":""}`} onClick={() => setExpanded(v => !v)}>
+        <td className="px-2 py-3" onClick={e=>e.stopPropagation()}>
+          <input type="checkbox" checked={!!selected} onChange={()=>onToggle?.()} className="w-4 h-4 rounded accent-blue-600"/>
+        </td>
         <td className="px-4 py-3">
           <p className="text-sm font-semibold text-gray-800">{record.userName}</p>
           {record.department && <p className="text-xs text-gray-400">{record.department}</p>}
@@ -106,25 +114,26 @@ function RecordRow({ record, onAction, isAdmin }: {
           <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${statusColor(record.status)}`}>{record.status}</span>
         </td>
         <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
-          {isPending && !isLocked && (
+          {isPending && !isLocked && canApprove!==false && (
             <div className="flex gap-1.5">
-              <button onClick={() => setModal("approved")} disabled={acting}
+              <button onClick={() => onOpenModal("approved")} disabled={acting}
                 className="text-xs bg-green-600 text-white px-3 py-1.5 rounded-lg hover:bg-green-700 font-semibold disabled:bg-gray-300">
                 Approve
               </button>
-              <button onClick={() => setModal("rejected")} disabled={acting}
+              <button onClick={() => onOpenModal("rejected")} disabled={acting}
                 className="text-xs bg-red-50 text-red-600 border border-red-200 px-3 py-1.5 rounded-lg hover:bg-red-100 font-semibold disabled:bg-gray-100">
                 Reject
               </button>
             </div>
           )}
           {isLocked && <span className="text-xs text-gray-400">🔒 Locked</span>}
+          {isPending && canApprove===false && <span className="text-xs text-gray-400 italic">View only</span>}
           {!isPending && !isLocked && <span className="text-xs text-gray-400">Reviewed</span>}
         </td>
       </tr>
       {expanded && (
         <tr className="bg-blue-50/50 border-b border-gray-100">
-          <td colSpan={5} className="px-6 py-3">
+          <td colSpan={6} className="px-6 py-3">
             <div className="grid grid-cols-3 gap-4 text-xs">
               <div><span className="text-gray-400 uppercase font-bold">Punch In</span><p className="text-gray-700 mt-0.5">{fmt(record.punchInTime ?? record.checkInTime)}</p></div>
               <div><span className="text-gray-400 uppercase font-bold">Punch Out</span><p className="text-gray-700 mt-0.5">{fmt(record.punchOutTime ?? record.checkOutTime)}</p></div>
@@ -136,9 +145,6 @@ function RecordRow({ record, onAction, isAdmin }: {
           </td>
         </tr>
       )}
-      {modalAction && (
-        <ReasonModal action={modalAction} onConfirm={r => handleAction(modalAction, r)} onCancel={() => setModal(null)} />
-      )}
     </>
   );
 }
@@ -146,17 +152,47 @@ function RecordRow({ record, onAction, isAdmin }: {
 export default function ApprovalsPage() {
   const { isAdmin, isManager, isDirector, profile, user } = useAuth();
   const [records, setRecords]     = useState<AttRecord[]>([]);
+  const [modalRecord, setModalRecord] = useState<AttRecord|null>(null);
+  const [modalAction, setModalAction] = useState<"approved"|"rejected"|null>(null);
   const [loading, setLoading]     = useState(true);
   const [tab, setTab]             = useState<"pending"|"approved"|"rejected"|"all">("pending");
   const [search, setSearch]       = useState("");
   const [deptMembers, setDeptMembers] = useState<string[]>([]);
 
-  const canApprove = isAdmin || isManager || isDirector;
+  const isHR = Array.isArray((profile as any)?.role)
+    ? (profile as any).role.includes("hr")
+    : (profile as any)?.role === "hr";
+  const canApprove = (isAdmin || isManager || isDirector) && !isHR;
+  // HR sees all records (same as admin scope) but read-only
+  const seeAll = isAdmin || isHR;
+
+  // Bulk selection state
+  const [selectedIds, setSelectedIds]       = useState<Set<string>>(new Set());
+  const [bulkSubmitting, setBulkSubmitting] = useState(false);
+
+  const toggleSelect = (id: string) => setSelectedIds(prev => {
+    const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
+  });
+  const handleBulk = (action: "approved"|"rejected") => {
+    if (!selectedIds.size) return;
+    const first = filtered.find(r => selectedIds.has(r.id));
+    if (first) { setModalRecord(first); setModalAction(action); }
+  };
+  const handleBulkConfirm = async (reason: string) => {
+    if (!modalAction) return;
+    setBulkSubmitting(true);
+    const act = modalAction;
+    for (const r of filtered.filter(r => selectedIds.has(r.id))) {
+      try { await handleAction(r, act, reason); } catch {}
+    }
+    setSelectedIds(new Set());
+    setBulkSubmitting(false);
+  };
 
   // Load team members this user can see
   const loadMembers = useCallback(async () => {
     if (!user) return;
-    if (isAdmin) { setDeptMembers([]); return; } // admin sees all
+    if (isAdmin || isHR) { setDeptMembers([]); return; } // admin and HR see all
 
     const members = isDirector
       ? await getDirectorMembers(user.uid, db)
@@ -179,8 +215,22 @@ export default function ApprovalsPage() {
       let att: AttRecord[] = attSnap.docs.map(d => ({ id: d.id, collection: "attendance" as const, ...d.data() } as AttRecord));
       let ci: AttRecord[]  = ciSnap.docs.map(d => ({ id: d.id, collection: "checkins" as const, ...d.data() } as AttRecord));
 
+      // Filter: for absent/field-day records, verify they are within the last 30 days BY dateStr (not by creation timestamp)
+      // Records created today for yesterday have timestamp=today but dateStr=yesterday — still valid
+      // Records with dateStr > today (shouldn't exist but guard) must be filtered out
+      const todayDs = (() => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; })();
+      att = att.filter(r => {
+        if (r.type === "absent" || r.type === "field-day") {
+          // Must have dateStr and it must be in the past (not today, not future)
+          const ds = (r as any).dateStr;
+          if (!ds) return false; // no dateStr — stale data, skip
+          if (ds >= todayDs) return false; // today or future — not valid absent
+        }
+        return true;
+      });
+
       // Filter to only records this user can see
-      if (!isAdmin && deptMembers.length > 0) {
+      if (!seeAll && deptMembers.length > 0) {
         att = att.filter(r => deptMembers.includes(r.userId));
         ci  = ci.filter(r => deptMembers.includes(r.userId));
       }
@@ -191,10 +241,10 @@ export default function ApprovalsPage() {
         return tb - ta;
       }));
     } finally { setLoading(false); }
-  }, [user, isAdmin, deptMembers]);
+  }, [user, isAdmin, isHR, deptMembers]);
 
   useEffect(() => { loadMembers(); }, [loadMembers]);
-  useEffect(() => { if (!loading || deptMembers.length > 0 || isAdmin) loadRecords(); }, [deptMembers, isAdmin]);
+  useEffect(() => { if (deptMembers.length > 0 || isAdmin || isHR) loadRecords(); }, [deptMembers, isAdmin, isHR]);
 
   const handleAction = async (record: AttRecord, action: string, reason: string) => {
     const ref = doc(db, record.collection, record.id);
@@ -220,7 +270,7 @@ export default function ApprovalsPage() {
     await loadRecords();
   };
 
-  if (!canApprove) return <div className="p-8 text-center text-gray-400">Manager access required.</div>;
+  if (!canApprove && !isHR) return <div className="p-8 text-center text-gray-400">Manager access required.</div>;
 
   const filtered = records.filter(r => {
     const matchTab = tab === "all" ? true :
@@ -234,10 +284,14 @@ export default function ApprovalsPage() {
   const pendingCount = records.filter(r => r.status === "pending" || r.status === "absent").length;
 
   return (
+    <>
     <div className="p-8">
       <div className="flex justify-between items-start mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Approvals</h1>
+          <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-3">
+            Approvals
+            {isHR && <span className="text-xs font-semibold bg-amber-100 text-amber-700 px-2.5 py-1 rounded-full">👁 View Only</span>}
+          </h1>
           <p className="text-gray-500 text-sm mt-1">
             {isAdmin ? "All employees" : isDirector ? "Your departments" : "Your team"} · Last 30 days
           </p>
@@ -285,14 +339,14 @@ export default function ApprovalsPage() {
             <table className="w-full">
               <thead>
                 <tr className="bg-gray-50 border-b border-gray-100">
-                  {["Employee","Type","Time","Status","Actions"].map(h => (
+                  {["","Employee","Type","Time","Status","Actions"].map(h => (
                     <th key={h} className="px-4 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {filtered.map(r => (
-                  <RecordRow key={`${r.collection}-${r.id}`} record={r} onAction={handleAction} isAdmin={isAdmin} />
+                  <RecordRow key={`${r.collection}-${r.id}`} record={r} onAction={handleAction} isAdmin={isAdmin} selected={selectedIds.has(r.id)} onToggle={()=>toggleSelect(r.id)} onOpenModal={(action)=>{setModalRecord(r);setModalAction(action);}} canApprove={canApprove} />
                 ))}
               </tbody>
             </table>
@@ -300,5 +354,43 @@ export default function ApprovalsPage() {
         )}
       </div>
     </div>
+
+    {/* Bulk action bar */}
+    {selectedIds.size > 0 && (
+      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 bg-white border border-gray-200 shadow-xl rounded-2xl px-6 py-4 flex items-center gap-4 z-40">
+        <p className="text-sm font-bold text-gray-700">{selectedIds.size} selected</p>
+        <button onClick={()=>handleBulk("approved")} disabled={bulkSubmitting}
+          className="bg-green-600 text-white px-5 py-2 rounded-xl text-sm font-semibold hover:bg-green-700 disabled:bg-gray-300">
+          ✓ Approve {selectedIds.size}
+        </button>
+        <button onClick={()=>handleBulk("rejected")} disabled={bulkSubmitting}
+          className="bg-red-600 text-white px-5 py-2 rounded-xl text-sm font-semibold hover:bg-red-700 disabled:bg-gray-300">
+          ✕ Reject {selectedIds.size}
+        </button>
+        <button onClick={()=>setSelectedIds(new Set())} className="text-gray-400 hover:text-gray-600 text-sm">
+          Clear
+        </button>
+      </div>
+    )}
+
+    {/* Reason modal — outside table to avoid div-in-tbody error */}
+    {modalAction && modalRecord && (
+      <ReasonModal
+        action={modalAction}
+        onConfirm={async (reason) => {
+          const act = modalAction!;
+          setModalAction(null);
+          setModalRecord(null);
+          if(selectedIds.size > 1){
+            await handleBulkConfirm(reason);
+          } else {
+            const rec = modalRecord!;
+            await handleAction(rec, act, reason);
+          }
+        }}
+        onCancel={() => { setModalAction(null); setModalRecord(null); }}
+      />
+    )}
+    </>
   );
 }

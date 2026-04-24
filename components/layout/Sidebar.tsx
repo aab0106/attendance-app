@@ -6,8 +6,9 @@ import { useAuth } from "@/lib/auth-context";
 
 const NAV_ITEMS = [
   { href: "/dashboard",    label: "Dashboard",    icon: "📊", roles: ["admin","manager","hr","director"] },
-  { href: "/attendance",   label: "Live Attendance",icon: "📋", roles: ["admin","manager","director"] },
-  { href: "/approvals",    label: "Approvals",    icon: "✅", roles: ["admin","manager","director"] },
+  { href: "/attendance",   label: "Live Attendance",icon: "📋", roles: ["admin","manager","director","hr"] },
+  { href: "/approvals",    label: "Approvals",    icon: "✅", roles: ["admin","manager","director","hr"] },
+  { href: "/leaves",       label: "Leave Requests", icon: "📋", roles: ["admin","manager","director","hr"] },
   { href: "/users",        label: "Users",        icon: "👤", roles: ["admin"] },
   { href: "/devices",      label: "Device Approvals", icon: "📱", roles: ["admin"] },
   { href: "/departments",  label: "Departments",  icon: "🏢", roles: ["admin"] },
@@ -20,8 +21,9 @@ const NAV_ITEMS = [
 const REPORT_ITEMS = [
   { href: "/reports/daily",   label: "Daily Report",   icon: "📅", roles: ["admin","manager","hr","director"] },
   { href: "/reports/monthly", label: "Monthly Report", icon: "🗓️", roles: ["admin","manager","hr","director"] },
-  { href: "/reports/late",    label: "Late Report",    icon: "🕐", roles: ["admin","manager","director"] },
-  { href: "/reports/visits",  label: "Visit Report",   icon: "🚗", roles: ["admin","manager","director"] },
+  { href: "/reports/late",    label: "Late Report",    icon: "🕐", roles: ["admin","manager","director","hr"] },
+  { href: "/reports/visits",  label: "Visit Report",   icon: "🚗", roles: ["admin","manager","director","hr"] },
+  { href: "/reports/leaves",  label: "Leave Report",   icon: "📋", roles: ["admin","manager","director","hr"] },
 ];
 
 export default function Sidebar() {

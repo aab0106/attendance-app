@@ -9,6 +9,7 @@ interface Record {
   id:string; userId:string; userName:string; type:string; status:string;
   punchInTime?:any; punchOutTime?:any; durationMinutes?:number;
   lateStatus?:string; lateMinutes?:number; department?:string; dateStr?:string; timestamp?:any;
+  punchLocation?:string; punchSiteName?:string; punchInLocation?:{latitude?:number;longitude?:number;name?:string};
 }
 
 const fmt = (ts:any) => {
@@ -24,7 +25,10 @@ const fmtDate = (ts:any) => {
 
 export default function DailyReportPage() {
   const { isAdmin, isDirector, user } = useAuth();
-  const [date, setDate]         = useState(()=>new Date().toISOString().split("T")[0]);
+  const [date, setDate]         = useState(()=>{
+    const d=new Date();
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  });
   const [data, setData]         = useState<Record[]>([]);
   const [loading, setLoading]   = useState(false);
   const [search, setSearch]     = useState("");
@@ -69,10 +73,56 @@ export default function DailyReportPage() {
         getDocs(query(collection(db,"attendance"),where("dateStr","==",date))),
       ]);
       const seen=new Set<string>(); const all:Record[]=[];
-      [...tsSnap.docs,...dsSnap.docs].forEach(d=>{
+      // From timestamp query: only include punch-in (they don't all have dateStr)
+      // absent/field-day records MUST match by dateStr, not by when-they-were-created
+      tsSnap.docs.forEach(d=>{
+        const r = d.data() as any;
+        if (r.type !== "absent" && r.type !== "field-day") {
+          if(!seen.has(d.id)){seen.add(d.id);all.push({id:d.id,...r} as Record);}
+        }
+      });
+      // From dateStr query: include everything
+      dsSnap.docs.forEach(d=>{
         if(!seen.has(d.id)){seen.add(d.id);all.push({id:d.id,...d.data()} as Record);}
       });
-      setData(all);
+      // Get today's date in local YYYY-MM-DD
+      const todayDs = (() => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; })();
+
+      // Helper: get YYYY-MM-DD for any record (prefer dateStr, fallback to timestamp)
+      const recDate = (r: any) => {
+        if (r.dateStr) return r.dateStr;
+        if (r.timestamp?.toDate) {
+          const d = r.timestamp.toDate();
+          return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+        }
+        return null;
+      };
+
+      // Filter stage 1: never show any absent record for today (ongoing day)
+      const filtered = all.filter(r => !(r.type === "absent" && recDate(r) === todayDs));
+
+      // Filter stage 2: for each user+date combo, if there's a punch-in, drop the absent
+      const activityMap = new Map<string, Set<string>>(); // "userId:date" → set of types
+      filtered.forEach(r => {
+        const d = recDate(r);
+        if (!d) return;
+        const key = `${r.userId}:${d}`;
+        if (!activityMap.has(key)) activityMap.set(key, new Set());
+        activityMap.get(key)!.add(r.type);
+      });
+
+      const deduped = filtered.filter(r => {
+        if (r.type !== "absent") return true; // keep all non-absent
+        const d = recDate(r);
+        const key = `${r.userId}:${d}`;
+        const types = activityMap.get(key) ?? new Set();
+        // If this user has a punch-in or field-day on this date, drop the absent record
+        if (types.has("punch-in") || types.has("field-day")) return false;
+        return true;
+      });
+
+      const final = deduped;
+      setData(final);
     } finally{ setLoading(false); }
   };
 
@@ -92,10 +142,11 @@ export default function DailyReportPage() {
   });
 
   const exportCSV=()=>{
-    const headers=["Date","Employee","Department","Type","Status","Punch In","Punch Out","Duration","Late"];
+    const headers=["Date","Employee","Department","Type","Status","Punch In","Punch Out","Location","Duration","Late"];
     const rows=filtered.map(r=>[fmtDate(r.punchInTime??r.timestamp),r.userName,
       depts.find(d=>d.id===r.department)?.name??r.department??"—",
       r.type,r.status,fmt(r.punchInTime),fmt(r.punchOutTime),
+      r.punchSiteName??r.punchLocation??r.punchInLocation?.name??"—",
       r.durationMinutes?`${Math.floor(r.durationMinutes/60)}h${r.durationMinutes%60}m`:"—",
       r.lateStatus==="late"?`${r.lateMinutes}min`:"—"]);
     const csv=[headers,...rows].map(r=>r.map(x=>'"'+String(x).replace(/"/g,'""')+'"').join(",")).join("\n");
@@ -111,6 +162,7 @@ export default function DailyReportPage() {
       <td style="padding:7px 10px"><span style="padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;background:${r.status==="approved"?"#dcfce7":r.status==="absent"?"#fee2e2":"#fef3c7"};color:${r.status==="approved"?"#16a34a":r.status==="absent"?"#dc2626":"#b45309"}">${r.status}</span></td>
       <td style="padding:7px 10px;font-family:monospace">${fmt(r.punchInTime)}</td>
       <td style="padding:7px 10px;font-family:monospace">${fmt(r.punchOutTime)}</td>
+      <td style="padding:7px 10px;font-size:11px;color:#555">${r.punchSiteName??r.punchLocation??r.punchInLocation?.name??"—"}</td>
       <td style="padding:7px 10px">${r.durationMinutes?Math.floor(r.durationMinutes/60)+"h "+r.durationMinutes%60+"m":"—"}</td>
       <td style="padding:7px 10px;color:${r.lateStatus==="late"?"#ea580c":"#999"}">${r.lateStatus==="late"?r.lateMinutes+"m late":"—"}</td>
     </tr>`).join("");
@@ -121,7 +173,7 @@ export default function DailyReportPage() {
     @media print{body{padding:0}}</style></head><body>
     <h1>Daily Attendance Report</h1>
     <p>${new Date(date+"T00:00:00").toLocaleDateString([],{weekday:"long",year:"numeric",month:"long",day:"numeric"})} · ${filtered.length} records</p>
-    <table><thead><tr><th>Date</th><th>Employee</th><th>Dept</th><th>Type</th><th>Status</th><th>Punch In</th><th>Punch Out</th><th>Duration</th><th>Late</th></tr></thead>
+    <table><thead><tr><th>Date</th><th>Employee</th><th>Dept</th><th>Type</th><th>Status</th><th>Punch In</th><th>Punch Out</th><th>Location</th><th>Duration</th><th>Late</th></tr></thead>
     <tbody>${rows}</tbody></table><script>window.onload=()=>window.print();</script></body></html>`;
     const w=window.open("","_blank");if(w){w.document.write(html);w.document.close();}
   };
@@ -196,12 +248,12 @@ export default function DailyReportPage() {
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead><tr className="bg-gray-50 border-b border-gray-100">
-                {["Employee","Department","Type","Status","Punch In","Punch Out","Duration","Late"].map(h=>(
+                {["Employee","Department","Type","Status","Punch In","Punch Out","Location","Duration","Late"].map(h=>(
                   <th key={h} className="px-4 py-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide">{h}</th>
                 ))}
               </tr></thead>
               <tbody>
-                {filtered.length===0?<tr><td colSpan={8} className="px-4 py-10 text-center text-gray-400 text-sm">No records found.</td></tr>
+                {filtered.length===0?<tr><td colSpan={9} className="px-4 py-10 text-center text-gray-400 text-sm">No records found.</td></tr>
                 :filtered.map((r,i)=>(
                   <tr key={r.id} className={`border-b border-gray-50 ${i%2===0?"":"bg-gray-50/50"}`}>
                     <td className="px-4 py-3 text-sm font-semibold text-gray-800">{r.userName}</td>
@@ -212,6 +264,13 @@ export default function DailyReportPage() {
                     </td>
                     <td className="px-4 py-3 text-xs font-mono text-gray-600">{fmt(r.punchInTime)}</td>
                     <td className="px-4 py-3 text-xs font-mono text-gray-600">{fmt(r.punchOutTime)}</td>
+                    <td className="px-4 py-3 text-xs text-gray-500">
+                      {(r.punchSiteName || r.punchLocation || r.punchInLocation?.name) ? (
+                        <span className="bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full text-xs font-medium">
+                          📍 {r.punchSiteName ?? r.punchLocation ?? r.punchInLocation?.name}
+                        </span>
+                      ) : "—"}
+                    </td>
                     <td className="px-4 py-3 text-xs text-gray-600">{r.durationMinutes?`${Math.floor(r.durationMinutes/60)}h ${r.durationMinutes%60}m`:"—"}</td>
                     <td className="px-4 py-3">{r.lateStatus==="late"?<span className="text-xs font-bold text-orange-600">{r.lateMinutes} min</span>:<span className="text-xs text-gray-300">—</span>}</td>
                   </tr>

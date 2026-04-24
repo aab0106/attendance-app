@@ -38,6 +38,7 @@ export default function DashboardPage() {
     setLoading(true);
     try {
       const startOfDay = new Date(); startOfDay.setHours(0,0,0,0);
+      const todayStr = (() => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; })();
 
       // Step 1: determine which user IDs this viewer can see
       let memberUids: string[] = [];
@@ -49,13 +50,27 @@ export default function DashboardPage() {
       }
 
       // Step 2: fetch raw data
-      const [usersSnap, attSnap, ciSnap] = await Promise.all([
+      // For attendance: query by timestamp (punch-ins) AND by dateStr=today (absent/field-day)
+      const [usersSnap, attTsSnap, attDsSnap, ciSnap] = await Promise.all([
         getDocs(query(collection(db,"users"), where("device.approved","==",true))),
         getDocs(query(collection(db,"attendance"), where("timestamp",">=",startOfDay))),
+        getDocs(query(collection(db,"attendance"), where("dateStr","==",todayStr))),
         getDocs(query(collection(db,"checkins"),   where("timestamp",">=",startOfDay))),
       ]);
 
-      let att = attSnap.docs.map(d=>({id:d.id,...d.data()} as any));
+      // Merge attendance: punch-ins from timestamp query, absent/field-day ONLY from dateStr query
+      const seen = new Set<string>();
+      let att: any[] = [];
+      attTsSnap.docs.forEach(d => {
+        const r = d.data() as any;
+        if (r.type !== "absent" && r.type !== "field-day") {
+          if(!seen.has(d.id)){seen.add(d.id); att.push({id:d.id, ...r});}
+        }
+      });
+      attDsSnap.docs.forEach(d => {
+        if(!seen.has(d.id)){seen.add(d.id); att.push({id:d.id, ...d.data()} as any);}
+      });
+
       let ci  = ciSnap.docs.map(d=>({id:d.id,...d.data()} as any));
       let allUsers = usersSnap.docs.map(d=>({id:d.id,...d.data()} as any));
 

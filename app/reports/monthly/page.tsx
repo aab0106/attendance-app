@@ -8,7 +8,7 @@ import Modal from "@/components/ui/Modal";
 
 interface AttRecord {
   id:string; userId:string; userName:string; type:string; status:string;
-  punchInTime?:any; punchOutTime?:any; durationMinutes?:number;
+  punchInTime?:any; punchOutTime?:any; durationMinutes?:number; punchLocation?:string; punchInLocation?:any;
   lateStatus?:string; lateMinutes?:number; lateApproved?:boolean|null;
   lateReason?:string; reviewReason?:string; dateStr?:string; timestamp?:any;
   fieldDaySummary?:string; autoClosedAt?:any; closedBy?:string;
@@ -18,13 +18,17 @@ interface CheckIn {
   checkInTime?:any; checkOutTime?:any; durationMinutes?:number;
   status:string; clientName?:string; siteName?:string; dateStr?:string;
   closedBy?:string; managerMinutes?:number;
+  lateStatus?:string; lateMinutes?:number; lateApproved?:boolean|null;
 }
 interface Policy {
   id:string; name:string; workStartTime:string; workEndTime:string;
   graceMinutes:number; workDays:number[]; departmentIds:string[]; appliesToAll:boolean;
+  policyType?:"office"|"field";
+  earlyGoingMins?:number; overtimeAfterMins?:number; gapCreditMins?:number;
+  minDailyHours?:number; maxGapMins?:number; travelTimeCredit?:boolean; flexibleStart?:boolean;
 }
 interface Department { id:string; name:string; parentDeptId?:string; }
-interface UserRecord { id:string; name?:string; email:string; department?:string; employeeId?:string; designation?:string; }
+interface UserRecord { id:string; name?:string; email:string; department?:string; employeeId?:string; designation?:string; employeeType?:"office"|"field"; }
 
 const parseTime = (t:string) => { const [h,m]=(t??"00:00").split(":").map(Number); return h*60+(m||0); };
 const fmtHM = (mins:number) => {
@@ -52,6 +56,38 @@ const getDiffMins = (a:any, b:any) => {
   return Math.max(0, Math.round((db2.getTime()-da.getTime())/60000));
 };
 const DAYS=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+
+// ── Compute total punch minutes for a set of sessions on one day ──────────────
+// Sessions: [{inTime, outTime}] sorted by inTime
+// Gap credit: if gap between sessions < gapCreditMins, gap is counted as work
+function computeTotalWithGapCredit(
+  sessions: {inTime:Date; outTime:Date}[],
+  gapCreditMins: number,
+  minSessionMins: number = 1  // ignore sessions under 1 min (identical timestamps = bad data)
+): number {
+  if (!sessions.length) return 0;
+  const valid = sessions
+    .filter(s => {
+      const dur = (s.outTime.getTime() - s.inTime.getTime()) / 60000;
+      return dur >= minSessionMins;
+    })
+    .sort((a,b) => a.inTime.getTime() - b.inTime.getTime());
+  if (!valid.length) return 0;
+
+  let total = 0;
+  for (let i = 0; i < valid.length; i++) {
+    const dur = (valid[i].outTime.getTime() - valid[i].inTime.getTime()) / 60000;
+    total += dur;
+    // Add gap to next session if within credit threshold
+    if (i < valid.length - 1) {
+      const gap = (valid[i+1].inTime.getTime() - valid[i].outTime.getTime()) / 60000;
+      if (gap > 0 && gap <= gapCreditMins) {
+        total += gap; // credit the gap
+      }
+    }
+  }
+  return Math.round(total);
+}
 
 function getDatesInMonth(year:number,mon:number):string[]{
   const dates:string[]=[];
@@ -215,18 +251,56 @@ export default function MonthlyReportPage() {
         ? filteredUsers.filter(u=>scopedIds===null||scopedIds.has(u.id))
         : scopeFilteredUsers;
 
-      const [attSnap,ciSnap]=await Promise.all([
+      // Attendance query: punch-ins by timestamp + absent/field-day by dateStr (monthly range)
+      const monthStartStr = `${year}-${String(mon).padStart(2,"0")}-01`;
+      const nextMon = mon===12 ? 1 : mon+1;
+      const nextYr  = mon===12 ? year+1 : year;
+      const monthEndStr = `${nextYr}-${String(nextMon).padStart(2,"0")}-01`;
+
+      const [attTsSnap,attDsSnap,ciSnap,leaveSnap,holSnap]=await Promise.all([
         getDocs(query(collection(db,"attendance"),where("timestamp",">=",start),where("timestamp","<",end))),
+        getDocs(query(collection(db,"attendance"),where("dateStr",">=",monthStartStr),where("dateStr","<",monthEndStr))),
         getDocs(query(collection(db,"checkins"),where("checkInTime",">=",start),where("checkInTime","<",end))),
+        getDocs(query(collection(db,"leaves"),where("status","==","approved"))),
+        getDocs(query(collection(db,"holidays"),where("active","==",true))),
       ]);
-      const allRecs  = attSnap.docs.map(d=>({id:d.id,...d.data()} as AttRecord));
-      const allCIs   = ciSnap.docs.map(d=>({id:d.id,...d.data()} as CheckIn));
+      // Merge attendance: timestamp query (punch-ins, not absent/field-day), dateStr query (absent/field-day)
+      const attSeen = new Set<string>();
+      const allRecs: AttRecord[] = [];
+      attTsSnap.docs.forEach(d => {
+        const r = d.data() as any;
+        if (r.type !== "absent" && r.type !== "field-day") {
+          if(!attSeen.has(d.id)){attSeen.add(d.id); allRecs.push({id:d.id, ...r} as AttRecord);}
+        }
+      });
+      attDsSnap.docs.forEach(d => {
+        if(!attSeen.has(d.id)){attSeen.add(d.id); allRecs.push({id:d.id, ...d.data()} as AttRecord);}
+      });
+      const allCIs    = ciSnap.docs.map(d=>({id:d.id,...d.data()} as CheckIn));
+      const allLeaves = leaveSnap.docs.map(d=>({id:d.id,...d.data()} as any));
+      // Build a set of holiday dates for fast lookup
+      const holidayDates = new Set<string>();
+      holSnap.docs.forEach(d=>{
+        const h=d.data() as any;
+        (h.dates??[]).forEach((ds:string)=>holidayDates.add(ds));
+      });
+      // Cutoff: before 6PM → use yesterday (today is ongoing, don't penalise yet)
+      //          after 6PM  → use today (workday ended, absent marking may have run)
+      const now = new Date();
+      const isAfter6PM = now.getHours() >= 18;
+      const cutoffDate = isAfter6PM
+        ? new Date(now.getFullYear(), now.getMonth(), now.getDate())           // today
+        : new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);      // yesterday
+      const cutoffStr = `${cutoffDate.getFullYear()}-${String(cutoffDate.getMonth()+1).padStart(2,"0")}-${String(cutoffDate.getDate()).padStart(2,"0")}`;
 
       const summary = targetUsers.map(u=>{
         const recs = allRecs.filter(r=>r.userId===u.id);
         const cis  = allCIs.filter(c=>c.userId===u.id);
         const policy = getPolicyForUser(u);
-        const policyMins = policy?parseTime(policy.workEndTime)-parseTime(policy.workStartTime):480;
+        const isField = (policy as any)?.policyType==="field" || (u as any).employeeType==="field";
+        const policyMins = isField
+          ? ((policy as any)?.minDailyHours??6)*60
+          : policy?parseTime(policy.workEndTime)-parseTime(policy.workStartTime):480;
         let present=0,fieldDays=0,absent=0,leave=0,late=0,lateUnexcused=0,punchMins=0,ciMins=0,excessMins=0;
         const dayMap=new Map<string,{recs:AttRecord[];cis:CheckIn[]}>();
         for(const r of recs){
@@ -239,25 +313,79 @@ export default function MonthlyReportPage() {
           if(!dayMap.has(ds))dayMap.set(ds,{recs:[],cis:[]});
           dayMap.get(ds)!.cis.push(c);
         }
+        const uLeavesSummary = allLeaves.filter((l:any)=>l.userId===u.id);
+        // Also iterate all working days (not just days with records) for short hours
+        const [yr,mn]=month.split("-").map(Number);
+        const workDaysArr = policy?.workDays??[1,2,3,4,5];
+        const workingDates=getDatesInMonth(yr,mn).filter(ds=>{
+          if(ds > cutoffStr) return false;
+          if(holidayDates.has(ds)) return false;
+          const d=new Date(ds+"T00:00:00");
+          return workDaysArr.includes(d.getDay());
+        });
+
         for(const[ds,day]of Array.from(dayMap)){
-          const punches=day.recs.filter(r=>r.type==="punch-in"&&r.status==="approved"&&r.durationMinutes);
+          // Include any punch/checkin with a duration (approved OR auto-closed)
+          // Recompute punch duration with gap credit
+          const gapCreditMins = (policy as any)?.gapCreditMins ?? 15;
+          const punchesRaw=day.recs.filter(r=>r.type==="punch-in");
+          const punchSessionsSum = punchesRaw
+            .filter(r=>r.punchInTime&&r.punchOutTime)
+            .map(r=>({
+              inTime:  r.punchInTime.toDate?r.punchInTime.toDate():new Date(r.punchInTime),
+              outTime: r.punchOutTime.toDate?r.punchOutTime.toDate():new Date(r.punchOutTime),
+            }));
+          const dayPunch = computeTotalWithGapCredit(punchSessionsSum, gapCreditMins);
+          const punches = punchesRaw.filter(r=>r.durationMinutes!=null&&r.durationMinutes>=5||(r.punchInTime&&r.punchOutTime));
+          const checkinsRaw=day.cis;
+          const checkins=checkinsRaw.map(c=>{
+            if(c.checkInTime&&c.checkOutTime){
+              const inT=c.checkInTime.toDate?c.checkInTime.toDate():new Date(c.checkInTime);
+              const outT=c.checkOutTime.toDate?c.checkOutTime.toDate():new Date(c.checkOutTime);
+              return{...c,durationMinutes:Math.max(0,Math.round((outT.getTime()-inT.getTime())/60000))};
+            }
+            return c;
+          }).filter(c=>c.durationMinutes!=null&&c.durationMinutes>0);
           const field=day.recs.find(r=>r.type==="field-day"&&r.status==="approved");
           const abs=day.recs.find(r=>r.type==="absent");
-          const checkins=day.cis.filter(c=>c.status==="approved"&&c.durationMinutes);
-          const dayPunch=punches.reduce((a,r)=>a+(r.durationMinutes??0),0);
           const dayCI=checkins.reduce((a,c)=>a+(c.durationMinutes??0),0);
           const dayTotal=field?policyMins:dayPunch+dayCI;
-          const lateRec=day.recs.find(r=>r.lateStatus==="late");
-          const latePen=lateRec?.lateApproved===false?(lateRec.lateMinutes??0):0;
+          const lateRec:any=day.recs.find(r=>r.lateStatus==="late")||day.cis.find((c:any)=>c.lateStatus==="late");
+          const graceMin = isField ? 99999 : (policy?.graceMinutes??0);
+          const rawLate  = lateRec?.lateMinutes??0;
+          const effectiveLate = isField ? 0 : Math.max(0, rawLate - graceMin);
+          const latePen=lateRec?.lateApproved===false ? effectiveLate : 0;
+          const d=new Date(ds+"T00:00:00");
+          const isWorkDay=policy?(policy.workDays??[1,2,3,4,5]).includes(d.getDay()):d.getDay()!==0&&d.getDay()!==6;
+          const leaveThisDay=uLeavesSummary.some((l:any)=>l.fromDate<=ds&&l.toDate>=ds&&isWorkDay);
+          const isExcused=(abs?.status==="approved")||leaveThisDay;
+
           if(field){fieldDays++;excessMins+=0;}
-          else if(punches.length>0||checkins.length>0){
-            present++; punchMins+=dayPunch; ciMins+=dayCI;
-            excessMins+=dayTotal-policyMins-latePen;
+          else if(isExcused && !(punches.length>0||checkins.length>0)){
+            // Leave only — no work, no deduction
+          } else if(isExcused && (punches.length>0||checkins.length>0)){
+            // Check-in wins over leave — count hours
+            present++; leave++;
+            punchMins+=dayPunch; ciMins+=dayCI;
+            excessMins+=dayTotal-policyMins-(isField?0:latePen);
+          } else if(punches.length>0||checkins.length>0){
+            present++;
+            punchMins+=dayPunch; ciMins+=dayCI;
+            excessMins+=dayTotal-policyMins-(isField?0:latePen); // no late penalty for field staff
           }
-          if(abs?.status==="approved")leave++;
-          else if(abs)absent++;
+          if(abs?.status==="approved"||leaveThisDay) leave++;
+          else if(abs) absent++;
           if(lateRec)late++;
           if(lateRec?.lateApproved===false)lateUnexcused++;
+        }
+
+        // Add short hours for working days with NO records at all
+        for(const ds of workingDates){
+          if(ds > cutoffStr) continue; // skip future dates
+          if(holidayDates.has(ds)) continue; // skip holidays
+          if(dayMap.has(ds)) continue; // already processed
+          const leaveThisDay=uLeavesSummary.some((l:any)=>l.fromDate<=ds&&l.toDate>=ds);
+          if(!leaveThisDay){ absent++; excessMins -= policyMins; } // full day short
         }
         return{user:u,policy,present,fieldDays,absent,leave,late,lateUnexcused,punchMins,ciMins,totalMins:punchMins+ciMins,excessMins};
       });
@@ -271,49 +399,147 @@ export default function MonthlyReportPage() {
         const dates=getDatesInMonth(year,mon);
         const urecs=allRecs.filter(r=>r.userId===u.id);
         const ucis=allCIs.filter(c=>c.userId===u.id);
-        const rows=dates.map(ds=>{
+        const uLeaves = allLeaves.filter((l:any)=>l.userId===u.id);
+        const isFieldEmp = u.employeeType === "field" || (policy as any)?.policyType === "field";
+        const detailPolicyMins = isFieldEmp
+          ? ((policy as any)?.minDailyHours ?? 6) * 60
+          : policyMins;
+        const detailGapCredit = isFieldEmp
+          ? ((policy as any)?.maxGapMins ?? 60)
+          : ((policy as any)?.gapCreditMins ?? 15);
+        const rows=dates.filter(ds=>ds<=cutoffStr).map(ds=>{
           const dayRecs=urecs.filter(r=>getDS(r.timestamp,r.dateStr)===ds);
           const dayCIs=ucis.filter(c=>getDS(c.checkInTime,c.dateStr)===ds);
           const d=new Date(ds+"T00:00:00");
           const weekday=DAYS[d.getDay()];
+          const isWeekend = d.getDay()===0||d.getDay()===6;
+          const isHoliday = holidayDates.has(ds);
+          const isWorkingDay = !isHoliday && (policy ? (policy.workDays??[1,2,3,4,5]).includes(d.getDay()) : !isWeekend);
+
           const punchRecs=dayRecs.filter(r=>r.type==="punch-in");
-          const approvedPunch=punchRecs.filter(r=>r.status==="approved"&&r.durationMinutes);
-          const approvedCI=dayCIs.filter(c=>c.status==="approved"&&c.durationMinutes);
-          const openPunch=punchRecs.filter(r=>r.status==="pending"&&!r.punchOutTime);
-          const openCI=dayCIs.filter(c=>c.status==="pending"&&!c.checkOutTime);
+          // Build sessions from punch records with both in/out times
+          const gapCredit = detailGapCredit;
+          const punchSessions = punchRecs
+            .filter(r => r.punchInTime && r.punchOutTime)
+            .map(r => ({
+              ...r,
+              inTime:  r.punchInTime.toDate  ? r.punchInTime.toDate()  : new Date(r.punchInTime),
+              outTime: r.punchOutTime.toDate ? r.punchOutTime.toDate() : new Date(r.punchOutTime),
+            }));
+          // Compute total punch minutes with gap credit between sessions
+          const totalPunchComputed = computeTotalWithGapCredit(
+            punchSessions.map(s => ({inTime: s.inTime, outTime: s.outTime})),
+            gapCredit
+          );
+          // Keep punchWithDuration for display (firstIn, lastOut)
+          const punchWithDuration = punchSessions.map(s => ({
+            ...s,
+            durationMinutes: Math.max(0, Math.round((s.outTime.getTime()-s.inTime.getTime())/60000))
+          }));
+          const approvedPunch = punchWithDuration.filter(r => r.durationMinutes >= 1); // min 1min (exclude zero-duration)
+          // For CI: if no durationMinutes but has both in/out times, compute duration
+          const ciWithDuration = dayCIs.map(c => {
+            // Always recompute from timestamps when both exist
+            if(c.checkInTime && c.checkOutTime){
+              const inT  = c.checkInTime.toDate  ? c.checkInTime.toDate()  : new Date(c.checkInTime);
+              const outT = c.checkOutTime.toDate ? c.checkOutTime.toDate() : new Date(c.checkOutTime);
+              const dur  = Math.max(0, Math.round((outT.getTime()-inT.getTime())/60000));
+              return {...c, durationMinutes: dur};
+            }
+            return c;
+          });
+          const approvedCI=ciWithDuration.filter(c=>c.durationMinutes!=null&&c.durationMinutes>0);
+          const openPunch=punchRecs.filter(r=>!r.durationMinutes&&!r.punchOutTime);
+          const openCI=dayCIs.filter(c=>!c.durationMinutes&&!c.checkOutTime);
           const fieldRec=dayRecs.find(r=>r.type==="field-day"&&r.status==="approved");
-          const absRec=dayRecs.find(r=>r.type==="absent");
-          const firstIn=punchRecs.sort((a,b)=>(a.punchInTime?.toDate?.()?.getTime()??0)-(b.punchInTime?.toDate?.()?.getTime()??0))[0];
-          const lastOut=punchRecs.filter(r=>r.punchOutTime).sort((a,b)=>(b.punchOutTime?.toDate?.()?.getTime()??0)-(a.punchOutTime?.toDate?.()?.getTime()??0))[0];
-          const firstCI=dayCIs.sort((a,b)=>(a.checkInTime?.toDate?.()?.getTime()??0)-(b.checkInTime?.toDate?.()?.getTime()??0))[0];
-          const lastCO=dayCIs.filter(c=>c.checkOutTime).sort((a,b)=>(b.checkOutTime?.toDate?.()?.getTime()??0)-(a.checkOutTime?.toDate?.()?.getTime()??0))[0];
-          const dayPunch=approvedPunch.reduce((a,r)=>a+(r.durationMinutes??0),0);
+          // Absent record — never show absent for today (ongoing day)
+          const isToday = ds === cutoffStr && !isAfter6PM;
+          const absRec = isToday ? undefined : dayRecs.find(r=>r.type==="absent");
+          // Check if an approved leave covers this day
+          const leaveForDay=uLeaves.find((l:any)=>l.fromDate<=ds&&l.toDate>=ds&&isWorkingDay);
+
+          const firstIn=[...punchWithDuration].sort((a,b)=>(a.punchInTime?.toDate?.()?.getTime()??0)-(b.punchInTime?.toDate?.()?.getTime()??0))[0];
+          const lastOut=punchWithDuration.filter(r=>r.punchOutTime).sort((a,b)=>(b.punchOutTime?.toDate?.()?.getTime()??0)-(a.punchOutTime?.toDate?.()?.getTime()??0))[0];
+          const firstCI=[...ciWithDuration].sort((a,b)=>(a.checkInTime?.toDate?.()?.getTime()??0)-(b.checkInTime?.toDate?.()?.getTime()??0))[0];
+          const lastCO=ciWithDuration.filter(c=>c.checkOutTime).sort((a,b)=>(b.checkOutTime?.toDate?.()?.getTime()??0)-(a.checkOutTime?.toDate?.()?.getTime()??0))[0];
+
+          const dayPunch = totalPunchComputed; // sum with gap credit applied
           const dayCI=approvedCI.reduce((a,c)=>a+(c.durationMinutes??0),0);
-          const dayTotal=fieldRec?policyMins:dayPunch+dayCI;
-          const lateRec=punchRecs.find(r=>r.lateStatus==="late");
-          const latePen=lateRec?.lateApproved===false?(lateRec.lateMinutes??0):0;
-          const hasActivity=punchRecs.length>0||dayCIs.length>0||fieldRec||absRec;
-          const excessMins=!hasActivity||absRec?null:(fieldRec?0:dayTotal-policyMins-latePen);
-          // Early going
-          let earlyGoing=false;
-          if(policy&&lastOut?.punchOutTime&&!fieldRec&&dayCIs.length===0){
-            const outD=lastOut.punchOutTime.toDate?lastOut.punchOutTime.toDate():new Date(lastOut.punchOutTime);
-            earlyGoing=outD.getHours()*60+outD.getMinutes()<parseTime(policy.workEndTime)-30;
+          const dayTotal=dayPunch+dayCI; // total = punch + checkin hours
+          const hasWork = approvedPunch.length>0 || approvedCI.length>0;
+          // Find late record — check ALL punch records for this day (not just approved)
+          const lateRec:any=punchRecs.find(r=>r.lateStatus==="late")||dayRecs.find(r=>r.lateStatus==="late");
+          // Effective late = raw lateMinutes stored (arrival-workStart), penalty = max(0, raw - grace)
+          // Field employees have no late penalty (flexible start)
+          const graceMin = isFieldEmp ? 99999 : (policy?.graceMinutes??0);
+          const rawLate = lateRec?.lateMinutes??0;
+          const effectiveLate = isFieldEmp ? 0 : Math.max(0, rawLate - graceMin);
+          const latePen=lateRec?.lateApproved===false ? effectiveLate : 0;
+
+          // isExcused: approved absent record OR approved leave from leaves collection
+          const isExcused = (absRec?.status==="approved") || !!leaveForDay;
+          // isAbsent (unexcused): absent record not yet approved
+          const isUnapprovedAbsent = absRec && absRec.status==="absent" && !leaveForDay;
+
+          // Excess/Short calculation:
+          // - Weekend / non-working day → null (no calculation)
+          // - Excused (leave/approved absent) → null (no deduction)
+          // - No activity on working day → -policyMins (full day short)
+          // - Has punch-in with checkout → hours worked minus policy hours
+          // - Only check-in (no punch-in) → those hours count but no policy expectation met
+          let excessMins:number|null = null;
+          if(!isWorkingDay){
+            excessMins = null; // weekend or holiday — skip
+          } else if(isExcused && !hasWork){
+            excessMins = null; // leave only day — no deduction
+          } else if(isExcused && hasWork){
+            // Check-in wins over leave — count hours vs policy
+            excessMins = dayTotal - detailPolicyMins - latePen;
+          } else if(fieldRec){
+            excessMins = 0;
+          } else if(hasWork){
+            // Has punch or check-in — count total hours vs policy (field: vs minDailyHours)
+            excessMins = dayTotal - detailPolicyMins - latePen;
+          } else {
+            // No record at all on working day — full day short
+            excessMins = -detailPolicyMins;
           }
-          // Remarks
+
+          // Early going: left more than 30min before end time AND total hours < policy hours
+          let earlyGoing=false;
+          if(!isFieldEmp&&policy&&lastOut?.punchOutTime&&!fieldRec&&!isExcused){
+            const outD=lastOut.punchOutTime.toDate?lastOut.punchOutTime.toDate():new Date(lastOut.punchOutTime);
+            const outMins=outD.getHours()*60+outD.getMinutes();
+            const endMins=parseTime(policy.workEndTime);
+            const earlyGoingBuffer = (policy as any)?.earlyGoingMins ?? 10;
+            earlyGoing = earlyGoingBuffer > 0 && outMins < (endMins - earlyGoingBuffer);
+          }
+
+          // Remarks — only relevant ones
           const remarks:string[]=[];
-          if(fieldRec)remarks.push(`Field Day${fieldRec.reviewReason?` — ${fieldRec.reviewReason}`:""}`);
-          else if(absRec?.status==="approved")remarks.push("Leave Approved");
-          if(lateRec)remarks.push(`Late ${lateRec.lateMinutes}min${lateRec.lateApproved===true?" (Excused)":lateRec.lateApproved===false?" (Unexcused)":""}`);
+          if(isHoliday) remarks.push("Holiday");
+          else if(fieldRec) remarks.push(`Field Day${fieldRec.reviewReason?` — ${fieldRec.reviewReason}`:""}`);
+          else if(isExcused && !hasWork && leaveForDay) remarks.push(`${leaveForDay.leaveLabel??leaveForDay.leaveType} (Leave)`);
+          if(lateRec && effectiveLate > 0) remarks.push(`Late ${effectiveLate}min${lateRec.lateApproved===true?" (Excused)":lateRec.lateApproved===false?" (Unexcused)":""}`);
           if(earlyGoing&&lastOut?.punchOutTime){
             const outD=lastOut.punchOutTime.toDate?lastOut.punchOutTime.toDate():new Date(lastOut.punchOutTime);
-            const earlyBy=(parseTime(policy!.workEndTime))-(outD.getHours()*60+outD.getMinutes());
-            if(earlyBy>0)remarks.push(`Left early ${Math.floor(earlyBy/60)}h ${earlyBy%60}m`);
+            const earlyBy=parseTime(policy!.workEndTime)-(outD.getHours()*60+outD.getMinutes());
+            if(earlyBy>0) remarks.push(`Left early ${Math.floor(earlyBy/60)}h ${earlyBy%60}m`);
           }
-          if(openPunch.length>0)remarks.push("⚠️ Open punch session");
-          if(openCI.length>0)remarks.push("⚠️ Open check-in");
+          // Absent remarks — show status clearly
+          if(absRec && absRec.status==="approved" && !leaveForDay) remarks.push("Absent (Approved)");
+          else if(absRec && absRec.status==="rejected") remarks.push("Absent (Rejected)");
+          else if(isUnapprovedAbsent) remarks.push("Absent (Pending)");
+          else if(isWorkingDay && !isHoliday && !hasWork && !leaveForDay && !fieldRec) {
+            remarks.push("Not Marked (no punch-in, run absent marking)");
+          }
+          if(openPunch.length>0) remarks.push("⚠️ Open punch session");
+          if(openCI.length>0) remarks.push("⚠️ Open check-in");
+
           return{date:ds,weekday,firstIn,lastOut,firstCI,lastCO,dayPunch,dayCI,dayTotal,excessMins,
-            remarks:remarks.join(" · "),fieldRec,absRec,punchRecs,dayCIs,earlyGoing,openPunch,openCI,lateRec,policy};
+            isWeekend,isWorkingDay,isExcused,leaveForDay,
+            remarks:remarks.join(" · "),fieldRec,absRec,punchRecs,dayCIs,earlyGoing,openPunch,openCI,lateRec,policy,
+            punchSessions: punchWithDuration.sort((a,b)=>a.inTime.getTime()-b.inTime.getTime())}; // sorted asc
         });
         setDetailRows(rows);
         setView("detail");
@@ -330,8 +556,8 @@ export default function MonthlyReportPage() {
       const csv=[h,...rows].map(r=>r.map(x=>'"'+String(x).replace(/"/g,'""')+'"').join(",")).join("\n");
       const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download=`monthly_summary_${month}.csv`;a.click();
     } else if(detailUser){
-      const h=["Date","Weekday","Punch In","Punch Out","Check-in","Check-out","Punch Hrs","CI Hrs","Total","Excess/Short","Remarks"];
-      const rows=detailRows.map(r=>[r.date,r.weekday,fmtTime(r.firstIn?.punchInTime),fmtTime(r.lastOut?.punchOutTime),fmtTime(r.firstCI?.checkInTime),fmtTime(r.lastCO?.checkOutTime),r.dayPunch?(r.dayPunch/60).toFixed(2):"",r.dayCI?(r.dayCI/60).toFixed(2):"",r.dayTotal?(r.dayTotal/60).toFixed(2):"",r.excessMins!=null?fmtHM(r.excessMins):"",r.remarks]);
+      const h=["Date","Weekday","Punch In","Punch Out","Location","Check-in","Check-out","Punch Hrs","CI Hrs","Total","Excess/Short","Remarks"];
+      const rows=detailRows.map(r=>[r.date,r.weekday,fmtTime(r.firstIn?.punchInTime),fmtTime(r.lastOut?.punchOutTime),r.firstIn?.punchSiteName??r.firstIn?.punchLocation??"—",fmtTime(r.firstCI?.checkInTime),fmtTime(r.lastCO?.checkOutTime),r.dayPunch?(r.dayPunch/60).toFixed(2):"",r.dayCI?(r.dayCI/60).toFixed(2):"",r.dayTotal?(r.dayTotal/60).toFixed(2):"",r.excessMins!=null?fmtHM(r.excessMins):"",r.remarks]);
       const csv=[h,...rows].map(r=>r.map(x=>'"'+String(x).replace(/"/g,'""')+'"').join(",")).join("\n");
       const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download=`monthly_${detailUser.name??detailUser.id}_${month}.csv`;a.click();
     }
@@ -347,22 +573,35 @@ export default function MonthlyReportPage() {
     const lateCount=detailRows.filter(r=>r.lateRec).length;
     const lateUnexc=detailRows.filter(r=>r.lateRec?.lateApproved===false).length;
     const earlyCount=detailRows.filter(r=>r.earlyGoing).length;
-    const notPunched=detailRows.filter(r=>r.punchRecs.length===0&&r.dayCIs.length===0&&!r.absRec&&!r.fieldRec).length;
+    const notPunched=detailRows.filter(r=>r.isWorkingDay&&r.punchRecs.length===0&&r.dayCIs.length===0&&!r.absRec&&!r.fieldRec&&!r.leaveForDay).length;
     const rows=detailRows.map((r,i)=>{
       const bg=r.absRec?"#fee2e2":r.fieldRec?"#e0f2fe":r.openPunch.length>0||r.openCI.length>0?"#fffbeb":i%2===0?"#fff":"#f9fafb";
       const exStr=r.excessMins!=null?fmtHM(r.excessMins):"";
       const exColor=r.excessMins==null?"":r.excessMins<0?"#dc2626":"#16a34a";
+      // Build punch sessions for PDF — punchSessions has punchInTime/punchOutTime Firestore fields + inTime/outTime JS Dates
+      // Sort by inTime (JS Date) ascending so sessions appear in order
+      const sessions = (r.punchSessions ?? [])
+        .filter((s:any) => s.punchInTime && s.punchOutTime)
+        .sort((a:any,b:any) => (a.inTime?.getTime?.()??0) - (b.inTime?.getTime?.()??0));
+      // Fallback: if no valid sessions but firstIn exists, show firstIn/lastOut as single row
+      const displaySessions = sessions.length > 0
+        ? sessions
+        : (r.firstIn ? [{ punchInTime: r.firstIn.punchInTime, punchOutTime: r.lastOut?.punchOutTime ?? null, punchSiteName: r.firstIn.punchSiteName, punchLocation: r.firstIn.punchLocation }] : []);
+      const punchInCell  = displaySessions.length > 0 ? displaySessions.map((s:any) => `<div style="font-family:monospace;line-height:1.6">${fmtTime(s.punchInTime)}</div>`).join("") : "—";
+      const punchOutCell = displaySessions.length > 0 ? displaySessions.map((s:any) => `<div style="font-family:monospace;line-height:1.6">${fmtTime(s.punchOutTime)}</div>`).join("") : "—";
+      const locationCell = displaySessions.length > 0 ? displaySessions.map((s:any) => `<div style="color:#2563eb;font-size:10px;line-height:1.6">${s.punchSiteName||s.punchLocation?"📍 "+(s.punchSiteName??s.punchLocation):"—"}</div>`).join("") : "—";
       return `<tr style="background:${bg}">
-        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-size:12px">${r.date}</td>
-        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-size:12px">${r.weekday}</td>
-        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-family:monospace;font-size:12px">${fmtTime(r.firstIn?.punchInTime)}</td>
-        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-family:monospace;font-size:12px">${fmtTime(r.lastOut?.punchOutTime)}</td>
-        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-family:monospace;font-size:12px">${fmtTime(r.firstCI?.checkInTime)}</td>
-        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-family:monospace;font-size:12px">${fmtTime(r.lastCO?.checkOutTime)}</td>
-        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-size:11px;text-align:center">${r.dayPunch?fmtDur(r.dayPunch):""}</td>
-        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-size:11px;text-align:center">${r.dayCI?fmtDur(r.dayCI):""}</td>
-        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-weight:700;color:${exColor};text-align:center;font-size:12px">${exStr}</td>
-        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;color:#555;font-size:11px">${r.remarks}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-size:12px;vertical-align:top">${r.date}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-size:12px;vertical-align:top">${r.weekday}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-size:12px;vertical-align:top">${punchInCell}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-size:12px;vertical-align:top">${punchOutCell}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-size:11px;vertical-align:top">${locationCell}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-family:monospace;font-size:12px;vertical-align:top">${fmtTime(r.firstCI?.checkInTime)}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-family:monospace;font-size:12px;vertical-align:top">${fmtTime(r.lastCO?.checkOutTime)}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-size:11px;text-align:center;vertical-align:top">${r.dayPunch?fmtDur(r.dayPunch):""}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-size:11px;text-align:center;vertical-align:top">${r.dayCI?fmtDur(r.dayCI):""}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;font-weight:700;color:${exColor};text-align:center;font-size:12px;vertical-align:top">${exStr}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #f0f0f0;color:#555;font-size:11px;vertical-align:top">${r.remarks}</td>
       </tr>`;
     }).join("");
     const html=`<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Monthly — ${detailUser.name??detailUser.email} — ${month}</title>
@@ -386,7 +625,7 @@ export default function MonthlyReportPage() {
       <div class="hdr-r"><p style="font-weight:600">${deptName}</p>${parentDept?`<p style="color:#888">${parentDept.name}</p>`:""}<p style="color:#aaa;font-size:10px;margin-top:3px">Generated ${new Date().toLocaleString()}</p></div>
     </div>
     <div class="layout"><div class="tbl"><table>
-      <thead><tr><th>Date</th><th>Day</th><th>Punch In</th><th>Punch Out</th><th>CI</th><th>CO</th><th style="text-align:center">Punch Hrs</th><th style="text-align:center">CI Hrs</th><th style="text-align:center">Excess/Short</th><th>Remarks</th></tr></thead>
+      <thead><tr><th>Date</th><th>Day</th><th>Punch In</th><th>Punch Out</th><th>Location</th><th>CI</th><th>CO</th><th style="text-align:center">Punch Hrs</th><th style="text-align:center">CI Hrs</th><th style="text-align:center">Excess/Short</th><th>Remarks</th></tr></thead>
       <tbody>${rows}</tbody>
       <tfoot><tr class="tot"><td colspan="8">TOTAL</td>
         <td style="text-align:center;color:${totalExcess<0?"#fca5a5":"#86efac"}">${fmtHM(totalExcess)}</td><td></td>
@@ -481,7 +720,12 @@ export default function MonthlyReportPage() {
                     <tr key={d.user.id} onClick={()=>{setFilterUser(d.user.id);}}
                       className={`border-b border-gray-50 cursor-pointer hover:bg-blue-50 ${i%2===0?"":"bg-gray-50/50"}`}>
                       <td className="px-3 py-3">
-                        <p className="text-sm font-semibold text-gray-800">{d.user.name??d.user.email}</p>
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-semibold text-gray-800">{d.user.name??d.user.email}</p>
+                          {((d.policy as any)?.policyType==="field"||(d.user as any).employeeType==="field")&&(
+                            <span className="text-xs bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full font-semibold">🚗</span>
+                          )}
+                        </div>
                         {d.user.employeeId&&<p className="text-xs text-blue-500 font-mono">{d.user.employeeId}</p>}
                       </td>
                       <td className="px-3 py-3 text-xs text-gray-500">{depts.find(x=>x.id===d.user.department)?.name??"—"}</td>
@@ -537,7 +781,13 @@ export default function MonthlyReportPage() {
                 <p className="font-semibold text-gray-700">{depts.find(x=>x.id===detailUser.department)?.name??"—"}</p>
                 {(()=>{const sub=depts.find(x=>x.id===detailUser.department);const par=depts.find(x=>x.id===sub?.parentDeptId);return par?<p className="text-sm text-gray-400">{par.name}</p>:null;})()}
                 <p className="text-xs text-gray-400 mt-1">{new Date(month+"-01").toLocaleDateString([],{month:"long",year:"numeric"})}</p>
-                {detailPolicy&&<p className="text-xs text-blue-500 mt-0.5">Policy: {detailPolicy.workStartTime}–{detailPolicy.workEndTime} ({fmtDur(parseTime(detailPolicy.workEndTime)-parseTime(detailPolicy.workStartTime))} day)</p>}
+                {detailPolicy&&(
+                  (detailPolicy as any).policyType==="field" ? (
+                    <p className="text-xs text-green-600 mt-0.5 font-semibold">🚗 Field Staff Policy · Min {(detailPolicy as any).minDailyHours??6}h/day · Travel credited ≤{(detailPolicy as any).maxGapMins??60}min gaps</p>
+                  ) : (
+                    <p className="text-xs text-blue-500 mt-0.5">Policy: {detailPolicy.workStartTime}–{detailPolicy.workEndTime} ({fmtDur(parseTime(detailPolicy.workEndTime)-parseTime(detailPolicy.workStartTime))} day)</p>
+                  )
+                )}
               </div>
             </div>
           </div>
@@ -548,25 +798,59 @@ export default function MonthlyReportPage() {
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
                   <thead><tr className="bg-gray-900 border-b border-gray-700">
-                    {["Date","Day","Punch In","Punch Out","CI","CO","Punch Hrs","CI Hrs","Excess/Short","Remarks"].map(h=>(
+                    {["Date","Day","Punch In","Punch Out","Location","CI","CO","Punch Hrs","CI Hrs","Excess/Short","Remarks"].map(h=>(
                       <th key={h} className="px-3 py-3 text-left text-xs font-bold text-gray-300 uppercase tracking-wide whitespace-nowrap">{h}</th>
                     ))}
                   </tr></thead>
                   <tbody>
                     {detailRows.map((r,i)=>{
-                      const rowBg=r.openPunch.length>0||r.openCI.length>0?"bg-amber-50":r.absRec?"bg-red-50":r.fieldRec?"bg-blue-50":i%2===0?"":"bg-gray-50/40";
+                      const rowBg=r.openPunch.length>0||r.openCI.length>0?"bg-amber-50":r.isExcused?"bg-green-50":r.absRec?"bg-red-50":r.fieldRec?"bg-blue-50":!r.isWorkingDay?"bg-gray-100/60":i%2===0?"":"bg-gray-50/40";
                       const exColor=r.excessMins==null?"text-gray-300":r.excessMins<0?"text-red-600 font-bold":"text-green-600 font-bold";
                       return(
                         <tr key={r.date} className={`border-b border-gray-50 ${rowBg}`}>
-                          <td className="px-3 py-2.5 font-mono text-gray-600">{r.date}</td>
-                          <td className="px-3 py-2.5 text-gray-500">{r.weekday}</td>
-                          <td className="px-3 py-2.5 font-mono text-gray-700">{fmtTime(r.firstIn?.punchInTime)}</td>
-                          <td className="px-3 py-2.5 font-mono text-gray-700">{fmtTime(r.lastOut?.punchOutTime)}</td>
-                          <td className="px-3 py-2.5 font-mono text-gray-500">{fmtTime(r.firstCI?.checkInTime)}</td>
-                          <td className="px-3 py-2.5 font-mono text-gray-500">{fmtTime(r.lastCO?.checkOutTime)}</td>
-                          <td className="px-3 py-2.5 text-center text-gray-600">{r.dayPunch?fmtDur(r.dayPunch):""}</td>
-                          <td className="px-3 py-2.5 text-center text-gray-500">{r.dayCI?fmtDur(r.dayCI):""}</td>
-                          <td className={`px-3 py-2.5 text-center ${exColor}`}>{r.excessMins!=null?fmtHM(r.excessMins):"—"}</td>
+                          <td className="px-3 py-2.5 font-mono text-gray-600 align-top">{r.date}</td>
+                          <td className="px-3 py-2.5 text-gray-500 align-top">{r.weekday}</td>
+                          <td className="px-3 py-2.5 align-top">
+                            {r.punchSessions?.length > 0 ? ( // sorted in return above
+                              <div className="space-y-0.5">
+                                {r.punchSessions.map((s:any,i:number)=>(
+                                  <div key={i} className="font-mono text-gray-700 text-xs">
+                                    {fmtTime(s.punchInTime)}
+                                    {(s.punchSiteName||s.punchLocation) ? <span className="text-gray-400 ml-1 text-xs">({s.punchSiteName??s.punchLocation})</span> : null}
+                                  </div>
+                                ))}
+                              </div>
+                            ) : <span className="font-mono text-gray-700">{fmtTime(r.firstIn?.punchInTime)}</span>}
+                          </td>
+                          <td className="px-3 py-2.5 align-top">
+                            {r.punchSessions?.length > 0 ? ( // sorted in return above
+                              <div className="space-y-0.5">
+                                {r.punchSessions.map((s:any,i:number)=>(
+                                  <div key={i} className="font-mono text-gray-700 text-xs">{fmtTime(s.punchOutTime)}</div>
+                                ))}
+                              </div>
+                            ) : <span className="font-mono text-gray-700">{fmtTime(r.lastOut?.punchOutTime)}</span>}
+                          </td>
+                          <td className="px-3 py-2.5 align-top">
+                            {r.punchSessions?.length > 0 ? ( // sorted in return above
+                              <div className="space-y-0.5">
+                                {r.punchSessions.map((s:any,i:number)=>(
+                                  <div key={i} className="text-xs text-blue-600">
+                                    {s.punchSiteName || s.punchLocation ? `📍 ${s.punchSiteName??s.punchLocation}` : "—"}
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              r.firstIn?.punchSiteName || r.firstIn?.punchLocation
+                                ? <span className="text-xs text-blue-600">📍 {r.firstIn?.punchSiteName??r.firstIn?.punchLocation}</span>
+                                : <span className="text-gray-300">—</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2.5 font-mono text-gray-500 align-top">{fmtTime(r.firstCI?.checkInTime)}</td>
+                          <td className="px-3 py-2.5 font-mono text-gray-500 align-top">{fmtTime(r.lastCO?.checkOutTime)}</td>
+                          <td className="px-3 py-2.5 text-center text-gray-600 align-top">{r.dayPunch?fmtDur(r.dayPunch):""}</td>
+                          <td className="px-3 py-2.5 text-center text-gray-500 align-top">{r.dayCI?fmtDur(r.dayCI):""}</td>
+                          <td className={`px-3 py-2.5 text-center align-top ${exColor}`}>{r.excessMins!=null?fmtHM(r.excessMins):"—"}</td>
                           <td className="px-3 py-2.5 text-gray-500 max-w-xs">
                             <span className={r.openPunch.length>0||r.openCI.length>0?"text-amber-600 font-semibold":""}>{r.remarks}</span>
                             {(r.openPunch.length>0||r.openCI.length>0)&&(
@@ -599,7 +883,7 @@ export default function MonthlyReportPage() {
               {(()=>{
                 const absCount=detailRows.filter(r=>r.absRec&&r.absRec.status!=="approved").length;
                 const absApproved=detailRows.filter(r=>r.absRec&&r.absRec.status==="approved").length;
-                const notPunched=detailRows.filter(r=>r.punchRecs.length===0&&r.dayCIs.length===0&&!r.absRec&&!r.fieldRec).length;
+                const notPunched=detailRows.filter(r=>r.isWorkingDay&&r.punchRecs.length===0&&r.dayCIs.length===0&&!r.absRec&&!r.fieldRec&&!r.leaveForDay).length;
                 const totalExcess=detailRows.reduce((a,r)=>a+(r.excessMins??0),0);
                 const lateCount=detailRows.filter(r=>r.lateRec).length;
                 const lateUnexc=detailRows.filter(r=>r.lateRec?.lateApproved===false).length;

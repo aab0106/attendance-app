@@ -28,14 +28,25 @@ export default function DevicesPage() {
   };
 
   const approve = async (u: UserRecord) => {
-    await updateDoc(doc(db,"users",u.id), { "device.approved": true });
-    loadUsers();
+    // Read current device, write full object back with approved:true
+    // This avoids dot-notation merge issues with mobile object writes
+    const { getDoc, setDoc } = await import("firebase/firestore");
+    const userRef = doc(db,"users",u.id);
+    const snap = await getDoc(userRef);
+    const current = snap.data()?.device ?? {};
+    await setDoc(userRef, {
+      device: { ...current, approved: true, approvedAt: new Date().toISOString() }
+    }, { merge: true });
+    await loadUsers();
   };
 
   const revoke = async (u: UserRecord) => {
     if(!confirm(`Revoke device for ${u.name??u.email}?`)) return;
-    await updateDoc(doc(db,"users",u.id), { "device.approved":false, "device.deviceId":null });
-    loadUsers();
+    const { setDoc } = await import("firebase/firestore");
+    await setDoc(doc(db,"users",u.id), {
+      device: { approved: false, deviceId: null, revokedAt: new Date().toISOString() }
+    }, { merge: true });
+    await loadUsers();
   };
 
   if(!isAdmin) return <div className="p-8 text-center text-gray-400">Admin access required.</div>;
