@@ -162,7 +162,7 @@ export default function PoliciesPage() {
 
       {/* Policy Type Selection Modal */}
       {showTypeModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={e=>{if(e.target===e.currentTarget) setShowTypeModal(false);}}>
           <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-xl">
             <h3 className="text-lg font-bold text-gray-900 mb-2">What type of policy?</h3>
             <p className="text-sm text-gray-500 mb-6">Choose the policy type that matches the employee's work style.</p>
@@ -268,7 +268,7 @@ export default function PoliciesPage() {
 
       {/* Form Modal */}
       {showForm && (
-        <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
+        <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto" onClick={e=>{if(e.target===e.currentTarget) setShowForm(false);}}>
           <div className="flex min-h-full items-start justify-center p-4 py-8">
           <div className="bg-white rounded-2xl p-6 w-full max-w-xl shadow-xl">
             <div className="flex items-center gap-3 mb-6">

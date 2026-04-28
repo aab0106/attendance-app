@@ -64,9 +64,20 @@ export default function AttendancePage() {
   const [loading, setLoading]       = useState(true);
   const [tab, setTab]               = useState<"attendance"|"checkins"|"leaves">("attendance");
   const [todayLeaves, setTodayLeaves] = useState<LeaveRecord[]>([]);
+  const [userMap, setUserMap]         = useState<Map<string,any>>(new Map());
+  const [deptMap, setDeptMap]         = useState<Map<string,string>>(new Map());
   const [search, setSearch]         = useState("");
   const [filterStatus, setFilterStatus] = useState("");
 
+  const resolveName = (userId:string, fallback:string) => {
+    const u = userMap.get(userId);
+    if (!u) return fallback?.includes("@") ? fallback.split("@")[0] : fallback;
+    return u.name || u.displayName || (u.email?.split("@")[0]) || fallback || userId;
+  };
+  const resolveDept = (userId:string, fallback?:string) => {
+    const u = userMap.get(userId);
+    return deptMap.get(u?.department) || deptMap.get(fallback||"") || "—";
+  };
   const todayStr = (() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
@@ -217,7 +228,8 @@ export default function AttendancePage() {
                 ) : filteredAtt.map(a => (
                   <tr key={a.id} className="border-b border-gray-50 hover:bg-gray-50">
                     <td className="px-4 py-3">
-                      <p className="text-sm font-semibold text-gray-800">{a.userName}</p>
+                      <p className="text-sm font-semibold text-gray-800">{resolveName(a.userId, a.userName)}</p>
+                      <p className="text-xs text-gray-400">{resolveDept(a.userId, a.department)}</p>
                       {a.department && <p className="text-xs text-gray-400">{a.department}</p>}
                     </td>
                     <td className="px-4 py-3">
@@ -270,7 +282,10 @@ export default function AttendancePage() {
                   <tr><td colSpan={6} className="px-4 py-10 text-center text-gray-400 text-sm">No check-ins today.</td></tr>
                 ) : filteredCI.map(c => (
                   <tr key={c.id} className="border-b border-gray-50 hover:bg-gray-50">
-                    <td className="px-4 py-3 text-sm font-semibold text-gray-800">{c.userName}</td>
+                    <td className="px-4 py-3">
+                      <p className="text-sm font-semibold text-gray-800">{resolveName(c.userId, c.userName)}</p>
+                      <p className="text-xs text-gray-400">{resolveDept(c.userId)}</p>
+                    </td>
                     <td className="px-4 py-3">
                       <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${c.subType==="outer-visit"?"bg-orange-100 text-orange-700":"bg-blue-100 text-blue-700"}`}>
                         {c.subType==="outer-visit"?"🚗 Outer Visit":"📍 Other Site"}
@@ -308,8 +323,8 @@ export default function AttendancePage() {
                 {todayLeaves.map(l => (
                   <tr key={l.id} className="border-b border-gray-50 hover:bg-gray-50">
                     <td className="px-4 py-3">
-                      <p className="text-sm font-semibold text-gray-800">{l.userName}</p>
-                      {l.department && <p className="text-xs text-gray-400">{l.department}</p>}
+                      <p className="text-sm font-semibold text-gray-800">{resolveName(l.userId, l.userName)}</p>
+                      <p className="text-xs text-gray-400">{resolveDept(l.userId, l.department)}</p>
                     </td>
                     <td className="px-4 py-3"><span className="text-xs font-semibold bg-teal-100 text-teal-700 px-2 py-0.5 rounded-full">{l.leaveLabel ?? l.leaveType}</span></td>
                     <td className="px-4 py-3 text-xs text-gray-600">{l.fromDate}</td>

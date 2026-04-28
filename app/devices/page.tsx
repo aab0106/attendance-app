@@ -28,24 +28,21 @@ export default function DevicesPage() {
   };
 
   const approve = async (u: UserRecord) => {
-    // Read current device, write full object back with approved:true
-    // This avoids dot-notation merge issues with mobile object writes
-    const { getDoc, setDoc } = await import("firebase/firestore");
-    const userRef = doc(db,"users",u.id);
-    const snap = await getDoc(userRef);
-    const current = snap.data()?.device ?? {};
-    await setDoc(userRef, {
-      device: { ...current, approved: true, approvedAt: new Date().toISOString() }
-    }, { merge: true });
+    // Use dot-notation updateDoc — atomic, doesn't race with mobile writes
+    await updateDoc(doc(db,"users",u.id), {
+      "device.approved":   true,
+      "device.approvedAt": new Date().toISOString(),
+    });
     await loadUsers();
   };
 
   const revoke = async (u: UserRecord) => {
     if(!confirm(`Revoke device for ${u.name??u.email}?`)) return;
-    const { setDoc } = await import("firebase/firestore");
-    await setDoc(doc(db,"users",u.id), {
-      device: { approved: false, deviceId: null, revokedAt: new Date().toISOString() }
-    }, { merge: true });
+    await updateDoc(doc(db,"users",u.id), {
+      "device.approved":  false,
+      "device.deviceId":  null,
+      "device.revokedAt": new Date().toISOString(),
+    });
     await loadUsers();
   };
 

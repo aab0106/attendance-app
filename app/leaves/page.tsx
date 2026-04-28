@@ -88,7 +88,12 @@ export default function LeavesPage() {
     try {
       const approved = actionType==="approve";
       const reviewerName = (profile as any)?.name ?? user.email;
-      if(isHR && !isAdmin) {
+      // Determine which stage to act on
+      // - HR (not admin): always acts as HR
+      // - Manager: always acts as manager
+      // - Admin: acts based on current status (pending_hr → HR action, pending_manager → manager action)
+      const actAsHR = isHR || (isAdmin && actionLeave.status === "pending_hr");
+      if(actAsHR) {
         await updateDoc(doc(db,"leaves",actionLeave.id),{
           hrStatus: approved?"approved":"rejected",
           hrNote: actionNote||null, reviewedByHR:reviewerName,
@@ -182,14 +187,14 @@ export default function LeavesPage() {
                         <p className="text-xs text-gray-400">
                           Manager: <span className={`font-semibold ${l.managerStatus==="approved"?"text-green-600":"text-red-600"}`}>{l.managerStatus}</span>
                           {l.reviewedByManager?` · ${l.reviewedByManager}`:""}
-                          {l.managerNote?` — "${l.managerNote}")`:""}
+                          {l.managerNote?` — "${l.managerNote}"`:""}
                         </p>
                       )}
                       {l.hrStatus && (
                         <p className="text-xs text-gray-400">
                           HR: <span className={`font-semibold ${l.hrStatus==="approved"?"text-green-600":"text-red-600"}`}>{l.hrStatus}</span>
                           {l.reviewedByHR?` · ${l.reviewedByHR}`:""}
-                          {l.hrNote?` — "${l.hrNote}")`:""}
+                          {l.hrNote?` — "${l.hrNote}"`:""}
                         </p>
                       )}
                     </div>

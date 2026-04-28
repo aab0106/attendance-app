@@ -20,7 +20,7 @@ const getSecondaryAuth = () => {
 interface UserRecord {
   id: string; email: string; name?: string;
   role: string | string[]; department?: string;
-  designation?: string; employeeId?: string; employeeType?: "office" | "field";
+  designation?: string; employeeId?: string; employeeType?: "office" | "field"; allowFieldWork?: boolean;
   blocked?: boolean;
   device?: { deviceId?: string; approved?: boolean };
 }
@@ -47,6 +47,7 @@ function EditUserModal({ user, deptList, onClose, onSaved }: {
   const [roles, setRoles]         = useState<string[]>(getRoles(user));
   const [joiningDate, setJoining] = useState<string>((user as any).joiningDate ?? "");
   const [empType, setEmpType]     = useState<"office"|"field">((user as any).employeeType ?? "office");
+  const [allowField, setAllowField] = useState<boolean>((user as any).allowFieldWork ?? false);
   const [saving, setSaving]       = useState(false);
   const [error, setError]         = useState("");
 
@@ -63,6 +64,7 @@ function EditUserModal({ user, deptList, onClose, onSaved }: {
         department:  dept || null,
         designation: designation.trim() || null,
         employeeType: empType,
+        allowFieldWork: empType === "office" ? allowField : false, // only office staff can be hybrid
         joiningDate: joiningDate || null,
         employeeId:  employeeId.trim() || null,
         role:        roles.length === 1 ? roles[0] : roles,
@@ -135,6 +137,21 @@ function EditUserModal({ user, deptList, onClose, onSaved }: {
             ))}
           </div>
           <p className="text-xs text-gray-400 mt-1">Field staff: travel time credited, auto-approved check-ins, measured by daily hours target</p>
+          {/* Hybrid checkbox — only for office staff */}
+          {empType === "office" && (
+            <label className="flex items-start gap-2 mt-3 p-3 bg-blue-50 border border-blue-100 rounded-xl cursor-pointer">
+              <input type="checkbox" checked={allowField} onChange={e=>setAllowField(e.target.checked)}
+                className="mt-0.5 w-4 h-4 rounded accent-blue-600"/>
+              <div>
+                <p className="text-sm font-semibold text-blue-800">Allow field work (occasional)</p>
+                <p className="text-xs text-blue-600 mt-0.5">
+                  For office staff who occasionally do client/market visits.
+                  On days they check-in at sites, field staff rules apply (travel credited, no late penalty).
+                  On office-only days, normal office rules apply.
+                </p>
+              </div>
+            </label>
+          )}
         </div>
 
         {error && <p className="text-red-600 text-xs bg-red-50 rounded-lg px-3 py-2">{error}</p>}
@@ -223,7 +240,7 @@ They will be logged out and must register their device again on next login.`)) r
             </div>
             {user.employeeId && <p className="text-xs text-blue-500 font-mono">{user.employeeId}</p>}
             {user.designation && <p className="text-xs text-gray-500 italic">{user.designation}</p>}
-            {(user as any).employeeType === "field" && (
+            {((user as any).employeeType === "field" || (user as any).allowFieldWork) && (
               <span className="text-xs font-bold bg-green-100 text-green-700 px-2 py-0.5 rounded-full">🚗 Field Staff</span>
             )}
             <p className="text-xs text-gray-400">{user.email}</p>
@@ -314,6 +331,7 @@ function AddUserModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =
   const [designation, setDesig]   = useState("");
   const [employeeId, setEmpId]    = useState("");
   const [empType, setEmpType]     = useState<"office"|"field">("office");
+  const [allowField, setAllowField] = useState<boolean>(false);
   const [roles, setRoles]         = useState<string[]>(["employee"]);
   const [joiningDate, setJoining] = useState(() => new Date().toISOString().split("T")[0]);
   const [saving, setSaving]       = useState(false);
@@ -435,6 +453,21 @@ function AddUserModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =
             ))}
           </div>
           <p className="text-xs text-gray-400 mt-1">Field staff: travel time credited, auto-approved check-ins, measured by daily hours target</p>
+          {/* Hybrid checkbox — only for office staff */}
+          {empType === "office" && (
+            <label className="flex items-start gap-2 mt-3 p-3 bg-blue-50 border border-blue-100 rounded-xl cursor-pointer">
+              <input type="checkbox" checked={allowField} onChange={e=>setAllowField(e.target.checked)}
+                className="mt-0.5 w-4 h-4 rounded accent-blue-600"/>
+              <div>
+                <p className="text-sm font-semibold text-blue-800">Allow field work (occasional)</p>
+                <p className="text-xs text-blue-600 mt-0.5">
+                  For office staff who occasionally do client/market visits.
+                  On days they check-in at sites, field staff rules apply (travel credited, no late penalty).
+                  On office-only days, normal office rules apply.
+                </p>
+              </div>
+            </label>
+          )}
         </div>
 
         {error && <p className="text-red-600 text-xs bg-red-50 rounded-lg px-3 py-2">{error}</p>}

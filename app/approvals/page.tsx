@@ -40,10 +40,15 @@ const typeLabel = (r: AttRecord) => {
   return r.type;
 };
 
-function ReasonModal({ action, onConfirm, onCancel }: {
-  action: "approved" | "rejected"; onConfirm: (reason: string) => void; onCancel: () => void;
+function ReasonModal({ action, record, onConfirm, onCancel }: {
+  action: "approved" | "rejected";
+  record?: any;
+  onConfirm: (reason: string, creditMinutes?: number) => void;
+  onCancel: () => void;
 }) {
   const [reason, setReason] = useState("");
+  const [creditMins, setCreditMins] = useState<number>(0);
+  const isLatePunch = action === "approved" && record?.lateStatus === "late" && record?.type === "punch-in";
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={e => { if (e.target === e.currentTarget) onCancel(); }}>
       <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-xl">
@@ -53,13 +58,28 @@ function ReasonModal({ action, onConfirm, onCancel }: {
         <p className="text-sm text-gray-500 mb-4">
           {action === "rejected" ? "Reason is required for rejection." : "Optional — add a reason or note."}
         </p>
+        {isLatePunch && (
+          <div className="mb-4 bg-amber-50 border border-amber-200 rounded-xl p-3">
+            <label className="block text-sm font-semibold text-amber-800 mb-1.5">
+              🕐 Credit Hours (minutes)
+            </label>
+            <p className="text-xs text-amber-700 mb-2">
+              Employee was late by {record?.lateMinutes} min. Optionally credit minutes back to offset the late penalty.
+            </p>
+            <input type="number" min={0} max={record?.lateMinutes ?? 0}
+              value={creditMins} onChange={e=>setCreditMins(Number(e.target.value)||0)}
+              placeholder="0"
+              className="w-full border border-amber-300 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"/>
+            <p className="text-xs text-amber-600 mt-1">Leave 0 if no credit needed (just approve).</p>
+          </div>
+        )}
         <textarea value={reason} onChange={e => setReason(e.target.value)} rows={3}
           placeholder={action === "rejected" ? "Enter rejection reason..." : "Optional reason..."}
           className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none mb-4" />
         <div className="flex gap-3">
           <button onClick={onCancel} className="flex-1 border border-gray-200 text-gray-600 rounded-xl py-2.5 text-sm font-semibold hover:bg-gray-50">Cancel</button>
           <button
-            onClick={() => { if (action === "rejected" && !reason.trim()) { alert("Reason required for rejection."); return; } onConfirm(reason.trim()); }}
+            onClick={() => { if (action === "rejected" && !reason.trim()) { alert("Reason required for rejection."); return; } onConfirm(reason.trim(), isLatePunch ? creditMins : undefined); }}
             className={`flex-1 text-white rounded-xl py-2.5 text-sm font-semibold ${action === "approved" ? "bg-green-600 hover:bg-green-700" : "bg-red-600 hover:bg-red-700"}`}>
             {action === "approved" ? "Approve" : "Reject"}
           </button>
@@ -69,14 +89,16 @@ function ReasonModal({ action, onConfirm, onCancel }: {
   );
 }
 
-function RecordRow({ record, onAction, isAdmin, onOpenModal, selected, onToggle, canApprove }: {
+function RecordRow({ record, onAction, isAdmin, onOpenModal, selected, onToggle, canApprove, resolveName, resolveDept }: {
   record: AttRecord;
-  onAction: (r: AttRecord, action: string, reason: string) => Promise<void>;
+  onAction: (r: AttRecord, action: string, reason: string, creditMinutes?: number) => Promise<void>;
   isAdmin: boolean;
   onOpenModal: (action: "approved"|"rejected") => void;
   selected?: boolean;
   onToggle?: () => void;
   canApprove?: boolean;
+  resolveName: (uid:string, fb:string) => string;
+  resolveDept: (uid:string, fb?:string) => string;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [acting, setActing]     = useState(false);
@@ -97,14 +119,18 @@ function RecordRow({ record, onAction, isAdmin, onOpenModal, selected, onToggle,
           <input type="checkbox" checked={!!selected} onChange={()=>onToggle?.()} className="w-4 h-4 rounded accent-blue-600"/>
         </td>
         <td className="px-4 py-3">
-          <p className="text-sm font-semibold text-gray-800">{record.userName}</p>
-          {record.department && <p className="text-xs text-gray-400">{record.department}</p>}
+          <p className="text-sm font-semibold text-gray-800">{resolveName(record.userId, record.userName)}</p>
+          <p className="text-xs text-gray-400">{resolveDept(record.userId, record.department)}</p>
         </td>
         <td className="px-4 py-3">
           <span className="text-xs font-semibold">{typeLabel(record)}</span>
           {record.fieldDaySummary && <p className="text-xs text-gray-400 mt-0.5">{record.fieldDaySummary}</p>}
         </td>
-        <td className="px-4 py-3 text-xs text-gray-500">{fmt(record.punchInTime ?? record.checkInTime ?? record.timestamp)}</td>
+        <td className="px-4 py-3 text-xs text-gray-500">{
+          (record.type === "absent" || record.type === "field-day") && (record as any).dateStr
+            ? new Date((record as any).dateStr + "T00:00:00").toLocaleDateString([], {month:"short", day:"numeric", year:"numeric"})
+            : fmt(record.punchInTime ?? record.checkInTime ?? record.timestamp)
+        }</td>
         <td className="px-4 py-3">
           {record.lateStatus === "late" && (
             <span className={`text-xs font-semibold px-2 py-0.5 rounded-full mr-1 ${record.lateApproved === true ? "bg-green-100 text-green-700" : record.lateApproved === false ? "bg-red-100 text-red-700" : "bg-orange-100 text-orange-700"}`}>
@@ -150,11 +176,14 @@ function RecordRow({ record, onAction, isAdmin, onOpenModal, selected, onToggle,
 }
 
 export default function ApprovalsPage() {
+  const [userMap, setUserMap] = useState<Map<string,any>>(new Map());
+  const [deptMap, setDeptMap] = useState<Map<string,string>>(new Map());
   const { isAdmin, isManager, isDirector, profile, user } = useAuth();
   const [records, setRecords]     = useState<AttRecord[]>([]);
   const [modalRecord, setModalRecord] = useState<AttRecord|null>(null);
   const [modalAction, setModalAction] = useState<"approved"|"rejected"|null>(null);
   const [loading, setLoading]     = useState(true);
+  const [filterType, setFilterType] = useState<"all"|"punch-in"|"absent"|"check-in">("all");
   const [tab, setTab]             = useState<"pending"|"approved"|"rejected"|"all">("pending");
   const [search, setSearch]       = useState("");
   const [deptMembers, setDeptMembers] = useState<string[]>([]);
@@ -166,7 +195,27 @@ export default function ApprovalsPage() {
   // HR sees all records (same as admin scope) but read-only
   const seeAll = isAdmin || isHR;
 
+  const resolveName = (userId:string, fallback:string) => {
+    const u = userMap.get(userId);
+    if (!u) return fallback?.includes("@") ? fallback.split("@")[0] : fallback;
+    return u.name || u.displayName || (u.email?.split("@")[0]) || fallback || userId;
+  };
+  const resolveDept = (userId:string, fallback?:string) => {
+    const u = userMap.get(userId);
+    return deptMap.get(u?.department) || deptMap.get(fallback||"") || "—";
+  };
+
   // Bulk selection state
+  // Load users and departments for name/dept resolution
+  useEffect(()=>{
+    Promise.all([
+      getDocs(collection(db,"users")),
+      getDocs(query(collection(db,"departments"),where("active","==",true))),
+    ]).then(([uSnap,dSnap])=>{
+      const um=new Map(); uSnap.docs.forEach(d=>um.set(d.id,d.data())); setUserMap(um);
+      const dm=new Map(); dSnap.docs.forEach(d=>dm.set(d.id,(d.data() as any).name)); setDeptMap(dm);
+    });
+  },[]);
   const [selectedIds, setSelectedIds]       = useState<Set<string>>(new Set());
   const [bulkSubmitting, setBulkSubmitting] = useState(false);
 
@@ -206,28 +255,98 @@ export default function ApprovalsPage() {
     try {
       const startDate = new Date();
       startDate.setDate(startDate.getDate() - 30); // last 30 days
+      const todayDs = (() => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; })();
+      const startDs = (() => { const d=new Date(startDate); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; })();
 
-      const [attSnap, ciSnap] = await Promise.all([
-        getDocs(query(collection(db, "attendance"), where("timestamp", ">=", startDate), orderBy("timestamp", "desc"), limit(200))),
-        getDocs(query(collection(db, "checkins"), where("timestamp", ">=", startDate), orderBy("timestamp", "desc"), limit(200))),
+      // Three queries:
+      // 1. attTsSnap: punch-ins by timestamp (last 30 days)
+      // 2. attDsSnap: absent/field-day by dateStr (last 30 days) — these may be created RECENTLY for OLD dates
+      // 3. allPunchSnap: ALL punch-ins (for building punchKeys to dedup absents) — no time limit
+      const [attTsSnap, attDsSnap, ciSnap] = await Promise.all([
+        getDocs(query(collection(db, "attendance"), where("timestamp", ">=", startDate), orderBy("timestamp", "desc"), limit(300))),
+        getDocs(query(collection(db, "attendance"), where("dateStr", ">=", startDs), where("dateStr", "<=", todayDs))),
+        getDocs(query(collection(db, "checkins"), where("timestamp", ">=", startDate), orderBy("timestamp", "desc"), limit(300))),
       ]);
 
-      let att: AttRecord[] = attSnap.docs.map(d => ({ id: d.id, collection: "attendance" as const, ...d.data() } as AttRecord));
+      // Merge attendance: punch-ins from timestamp query + absent/field-day from dateStr query
+      // De-dup by document ID
+      const attMap = new Map<string, AttRecord>();
+      attTsSnap.docs.forEach(d => {
+        const r = { id: d.id, collection: "attendance" as const, ...d.data() } as AttRecord;
+        // Skip absent/field-day from timestamp query (they belong to dateStr query)
+        if (r.type === "absent" || r.type === "field-day") return;
+        attMap.set(d.id, r);
+      });
+      attDsSnap.docs.forEach(d => {
+        const r = { id: d.id, collection: "attendance" as const, ...d.data() } as AttRecord;
+        if (!attMap.has(d.id)) attMap.set(d.id, r);
+      });
+      let att: AttRecord[] = Array.from(attMap.values());
       let ci: AttRecord[]  = ciSnap.docs.map(d => ({ id: d.id, collection: "checkins" as const, ...d.data() } as AttRecord));
 
-      // Filter: for absent/field-day records, verify they are within the last 30 days BY dateStr (not by creation timestamp)
-      // Records created today for yesterday have timestamp=today but dateStr=yesterday — still valid
-      // Records with dateStr > today (shouldn't exist but guard) must be filtered out
-      const todayDs = (() => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; })();
+      // Filter out absent/field-day records that are today or future (today is ongoing)
       att = att.filter(r => {
-        if (r.type === "absent" || r.type === "field-day") {
-          // Must have dateStr and it must be in the past (not today, not future)
-          const ds = (r as any).dateStr;
-          if (!ds) return false; // no dateStr — stale data, skip
-          if (ds >= todayDs) return false; // today or future — not valid absent
-        }
+        if (r.type !== "absent" && r.type !== "field-day") return true;
+        const ds = (r as any).dateStr;
+        if (!ds) return false; // no dateStr — stale data, skip
+        if (ds >= todayDs) return false; // today or future — not valid
         return true;
       });
+
+      // Build punchKeys: every userId+dateStr combo where we KNOW the user has activity
+      // Source from BOTH the 30-day query AND the dateStr query (catches records with timestamps outside window)
+      const punchKeys = new Set<string>();
+      const addPunchKey = (userId: string, ts: any, dateStr?: string) => {
+        let ds = dateStr;
+        if (!ds && ts?.toDate) {
+          const t = ts.toDate();
+          ds = `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`;
+        }
+        if (ds && userId) punchKeys.add(`${userId}_${ds}`);
+      };
+      // Punch-ins from attendance
+      att.forEach(r => {
+        if (r.type === "punch-in") addPunchKey(r.userId, r.timestamp, (r as any).dateStr);
+      });
+      // Also from raw timestamp query (in case some punch-ins got dropped above)
+      attTsSnap.docs.forEach(d => {
+        const r = d.data() as any;
+        if (r.type === "punch-in") addPunchKey(r.userId, r.timestamp, r.dateStr);
+      });
+      // Check-ins
+      ci.forEach(r => {
+        addPunchKey(r.userId, (r as any).checkInTime, (r as any).dateStr);
+      });
+
+      // Drop absents where the same user has activity that day
+      att = att.filter(r => {
+        if (r.type !== "absent") return true;
+        const ds = (r as any).dateStr;
+        if (!ds) return false;
+        return !punchKeys.has(`${r.userId}_${ds}`);
+      });
+
+      // Dedup duplicate absent records (same user + dateStr) — keep latest by timestamp
+      const absSeen = new Map<string, AttRecord>();
+      const others: AttRecord[] = [];
+      att.forEach(r => {
+        if (r.type === "absent") {
+          const ds = (r as any).dateStr;
+          if (!ds) return;
+          const key = `${r.userId}_${ds}`;
+          const existing = absSeen.get(key);
+          if (!existing) {
+            absSeen.set(key, r);
+          } else {
+            const tNew = r.timestamp?.toDate?.()?.getTime() ?? 0;
+            const tOld = existing.timestamp?.toDate?.()?.getTime() ?? 0;
+            if (tNew > tOld) absSeen.set(key, r);
+          }
+        } else {
+          others.push(r);
+        }
+      });
+      att = [...others, ...Array.from(absSeen.values())];
 
       // Filter to only records this user can see
       if (!seeAll && deptMembers.length > 0) {
@@ -246,15 +365,25 @@ export default function ApprovalsPage() {
   useEffect(() => { loadMembers(); }, [loadMembers]);
   useEffect(() => { if (deptMembers.length > 0 || isAdmin || isHR) loadRecords(); }, [deptMembers, isAdmin, isHR]);
 
-  const handleAction = async (record: AttRecord, action: string, reason: string) => {
+  const handleAction = async (record: AttRecord, action: string, reason: string, creditMinutes?: number) => {
     const ref = doc(db, record.collection, record.id);
-    await updateDoc(ref, {
+    const updates: any = {
       status:       action,
       reviewedAt:   serverTimestamp(),
       reviewedBy:   profile?.name ?? user?.email,
       reviewReason: reason || null,
       reversalCount: (record.reversalCount ?? 0) + (record.status !== "pending" && record.status !== "absent" ? 1 : 0),
-    });
+    };
+    // For late punch-in approvals, credit minutes back to offset late penalty
+    if (action === "approved" && record.lateStatus === "late" && record.type === "punch-in") {
+      updates.lateApproved = true;
+      if (creditMinutes && creditMinutes > 0) {
+        updates.lateCreditMinutes = creditMinutes;
+      }
+    } else if (action === "rejected" && record.lateStatus === "late") {
+      updates.lateApproved = false;
+    }
+    await updateDoc(ref, updates);
     // Log to statusLogs
     await addDoc(collection(db, "statusLogs"), {
       recordId:   record.id,
@@ -263,6 +392,7 @@ export default function ApprovalsPage() {
       fromStatus: record.status,
       toStatus:   action,
       reason:     reason || null,
+      creditMinutes: creditMinutes || null,
       reviewedBy: profile?.name ?? user?.email,
       isReversal: record.status !== "pending" && record.status !== "absent",
       timestamp:  serverTimestamp(),
@@ -276,9 +406,13 @@ export default function ApprovalsPage() {
     const matchTab = tab === "all" ? true :
       tab === "pending" ? (r.status === "pending" || r.status === "absent") :
       r.status === tab;
+    const matchType = filterType === "all" ? true :
+      filterType === "check-in" ? r.collection === "checkins" :
+      r.type === filterType;
     const q = search.toLowerCase();
-    const matchSearch = !q || r.userName.toLowerCase().includes(q);
-    return matchTab && matchSearch;
+    const resolvedName = resolveName(r.userId, r.userName).toLowerCase();
+    const matchSearch = !q || resolvedName.includes(q) || r.userName.toLowerCase().includes(q);
+    return matchTab && matchType && matchSearch;
   });
 
   const pendingCount = records.filter(r => r.status === "pending" || r.status === "absent").length;
@@ -326,6 +460,26 @@ export default function ApprovalsPage() {
           className="ml-auto border border-gray-200 rounded-xl px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
       </div>
 
+      {/* Type filter */}
+      <div className="flex gap-2 mb-6 flex-wrap items-center">
+        <span className="text-xs font-semibold text-gray-500 mr-2">Filter by type:</span>
+        {([
+          ["all", "All Types"],
+          ["punch-in", "🕐 Late Punches"],
+          ["absent", "❌ Absent"],
+          ["check-in", "📍 Check-ins"],
+        ] as const).map(([v, l]) => (
+          <button key={v} onClick={() => setFilterType(v as any)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+              filterType === v
+                ? "bg-gray-800 text-white"
+                : "bg-white border border-gray-200 text-gray-600 hover:bg-gray-50"
+            }`}>
+            {l}
+          </button>
+        ))}
+      </div>
+
       <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
         {loading ? (
           <div className="p-12 text-center text-gray-400 text-sm">Loading records...</div>
@@ -346,7 +500,7 @@ export default function ApprovalsPage() {
               </thead>
               <tbody>
                 {filtered.map(r => (
-                  <RecordRow key={`${r.collection}-${r.id}`} record={r} onAction={handleAction} isAdmin={isAdmin} selected={selectedIds.has(r.id)} onToggle={()=>toggleSelect(r.id)} onOpenModal={(action)=>{setModalRecord(r);setModalAction(action);}} canApprove={canApprove} />
+                  <RecordRow key={`${r.collection}-${r.id}`} record={r} onAction={handleAction} isAdmin={isAdmin} selected={selectedIds.has(r.id)} onToggle={()=>toggleSelect(r.id)} onOpenModal={(action)=>{setModalRecord(r);setModalAction(action);}} canApprove={canApprove} resolveName={resolveName} resolveDept={resolveDept} />
                 ))}
               </tbody>
             </table>
@@ -377,7 +531,8 @@ export default function ApprovalsPage() {
     {modalAction && modalRecord && (
       <ReasonModal
         action={modalAction}
-        onConfirm={async (reason) => {
+        record={modalRecord}
+        onConfirm={async (reason, creditMinutes) => {
           const act = modalAction!;
           setModalAction(null);
           setModalRecord(null);
@@ -385,7 +540,7 @@ export default function ApprovalsPage() {
             await handleBulkConfirm(reason);
           } else {
             const rec = modalRecord!;
-            await handleAction(rec, act, reason);
+            await handleAction(rec, act, reason, creditMinutes);
           }
         }}
         onCancel={() => { setModalAction(null); setModalRecord(null); }}

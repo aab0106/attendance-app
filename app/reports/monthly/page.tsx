@@ -298,9 +298,12 @@ export default function MonthlyReportPage() {
         const cis  = allCIs.filter(c=>c.userId===u.id);
         const policy = getPolicyForUser(u);
         const isField = (policy as any)?.policyType==="field" || (u as any).employeeType==="field";
-        const policyMins = isField
-          ? ((policy as any)?.minDailyHours??6)*60
-          : policy?parseTime(policy.workEndTime)-parseTime(policy.workStartTime):480;
+        const isHybrid = !isField && (u as any).allowFieldWork === true;
+        // For hybrid: per-day rules. Office days = office rules. Days with check-ins = field rules.
+        // policyMins for office calculation
+        const officePolicyMins = policy?parseTime(policy.workEndTime)-parseTime(policy.workStartTime):480;
+        const fieldPolicyMins = ((policy as any)?.minDailyHours??6)*60;
+        const policyMins = isField ? fieldPolicyMins : officePolicyMins;
         let present=0,fieldDays=0,absent=0,leave=0,late=0,lateUnexcused=0,punchMins=0,ciMins=0,excessMins=0;
         const dayMap=new Map<string,{recs:AttRecord[];cis:CheckIn[]}>();
         for(const r of recs){
@@ -349,12 +352,18 @@ export default function MonthlyReportPage() {
           const field=day.recs.find(r=>r.type==="field-day"&&r.status==="approved");
           const abs=day.recs.find(r=>r.type==="absent");
           const dayCI=checkins.reduce((a,c)=>a+(c.durationMinutes??0),0);
-          const dayTotal=field?policyMins:dayPunch+dayCI;
+          // Hybrid logic: if hybrid and has check-ins on this day → treat as field for this day
+          const isFieldDay = isField || (isHybrid && checkins.length > 0);
+          const dayPolicyMins = isFieldDay ? fieldPolicyMins : officePolicyMins;
+          const dayTotal=field?dayPolicyMins:dayPunch+dayCI;
           const lateRec:any=day.recs.find(r=>r.lateStatus==="late")||day.cis.find((c:any)=>c.lateStatus==="late");
-          const graceMin = isField ? 99999 : (policy?.graceMinutes??0);
+          const graceMin = isFieldDay ? 99999 : (policy?.graceMinutes??0);
           const rawLate  = lateRec?.lateMinutes??0;
-          const effectiveLate = isField ? 0 : Math.max(0, rawLate - graceMin);
-          const latePen=lateRec?.lateApproved===false ? effectiveLate : 0;
+          const effectiveLate = isFieldDay ? 0 : Math.max(0, rawLate - graceMin);
+          // Subtract credit minutes if late was approved with credit
+          const creditMins = lateRec?.lateCreditMinutes ?? 0;
+          const adjustedLate = Math.max(0, effectiveLate - creditMins);
+          const latePen=lateRec?.lateApproved===false ? adjustedLate : 0;
           const d=new Date(ds+"T00:00:00");
           const isWorkDay=policy?(policy.workDays??[1,2,3,4,5]).includes(d.getDay()):d.getDay()!==0&&d.getDay()!==6;
           const leaveThisDay=uLeavesSummary.some((l:any)=>l.fromDate<=ds&&l.toDate>=ds&&isWorkDay);
@@ -367,11 +376,11 @@ export default function MonthlyReportPage() {
             // Check-in wins over leave — count hours
             present++; leave++;
             punchMins+=dayPunch; ciMins+=dayCI;
-            excessMins+=dayTotal-policyMins-(isField?0:latePen);
+            excessMins+=dayTotal-dayPolicyMins-(isFieldDay?0:latePen);
           } else if(punches.length>0||checkins.length>0){
             present++;
             punchMins+=dayPunch; ciMins+=dayCI;
-            excessMins+=dayTotal-policyMins-(isField?0:latePen); // no late penalty for field staff
+            excessMins+=dayTotal-dayPolicyMins-(isFieldDay?0:latePen); // no late penalty for field days
           }
           if(abs?.status==="approved"||leaveThisDay) leave++;
           else if(abs) absent++;
@@ -401,12 +410,13 @@ export default function MonthlyReportPage() {
         const ucis=allCIs.filter(c=>c.userId===u.id);
         const uLeaves = allLeaves.filter((l:any)=>l.userId===u.id);
         const isFieldEmp = u.employeeType === "field" || (policy as any)?.policyType === "field";
-        const detailPolicyMins = isFieldEmp
-          ? ((policy as any)?.minDailyHours ?? 6) * 60
-          : policyMins;
-        const detailGapCredit = isFieldEmp
-          ? ((policy as any)?.maxGapMins ?? 60)
-          : ((policy as any)?.gapCreditMins ?? 15);
+        const isHybridEmp = !isFieldEmp && (u as any).allowFieldWork === true;
+        const officeDetailMins = policyMins;
+        const fieldDetailMins  = ((policy as any)?.minDailyHours ?? 6) * 60;
+        const detailPolicyMins = isFieldEmp ? fieldDetailMins : officeDetailMins;
+        const officeGap = (policy as any)?.gapCreditMins ?? 15;
+        const fieldGap  = (policy as any)?.maxGapMins ?? 60;
+        const detailGapCredit = isFieldEmp ? fieldGap : officeGap;
         const rows=dates.filter(ds=>ds<=cutoffStr).map(ds=>{
           const dayRecs=urecs.filter(r=>getDS(r.timestamp,r.dateStr)===ds);
           const dayCIs=ucis.filter(c=>getDS(c.checkInTime,c.dateStr)===ds);
@@ -469,12 +479,19 @@ export default function MonthlyReportPage() {
           const hasWork = approvedPunch.length>0 || approvedCI.length>0;
           // Find late record — check ALL punch records for this day (not just approved)
           const lateRec:any=punchRecs.find(r=>r.lateStatus==="late")||dayRecs.find(r=>r.lateStatus==="late");
+          // Hybrid: this day is treated as field if hybrid AND has check-ins
+          const isFieldDay = isFieldEmp || (isHybridEmp && dayCIs.length > 0);
+          const dayPolicyMins = isFieldDay ? fieldDetailMins : officeDetailMins;
+          const dayGapCredit  = isFieldDay ? fieldGap : officeGap;
           // Effective late = raw lateMinutes stored (arrival-workStart), penalty = max(0, raw - grace)
-          // Field employees have no late penalty (flexible start)
-          const graceMin = isFieldEmp ? 99999 : (policy?.graceMinutes??0);
+          // Field/hybrid-on-field-day: no late penalty
+          const graceMin = isFieldDay ? 99999 : (policy?.graceMinutes??0);
           const rawLate = lateRec?.lateMinutes??0;
-          const effectiveLate = isFieldEmp ? 0 : Math.max(0, rawLate - graceMin);
-          const latePen=lateRec?.lateApproved===false ? effectiveLate : 0;
+          const effectiveLate = isFieldDay ? 0 : Math.max(0, rawLate - graceMin);
+          // Subtract credit minutes if late was approved with credit
+          const creditMins = lateRec?.lateCreditMinutes ?? 0;
+          const adjustedLate = Math.max(0, effectiveLate - creditMins);
+          const latePen=lateRec?.lateApproved===false ? adjustedLate : 0;
 
           // isExcused: approved absent record OR approved leave from leaves collection
           const isExcused = (absRec?.status==="approved") || !!leaveForDay;
@@ -494,20 +511,20 @@ export default function MonthlyReportPage() {
             excessMins = null; // leave only day — no deduction
           } else if(isExcused && hasWork){
             // Check-in wins over leave — count hours vs policy
-            excessMins = dayTotal - detailPolicyMins - latePen;
+            excessMins = dayTotal - dayPolicyMins - latePen;
           } else if(fieldRec){
             excessMins = 0;
           } else if(hasWork){
             // Has punch or check-in — count total hours vs policy (field: vs minDailyHours)
-            excessMins = dayTotal - detailPolicyMins - latePen;
+            excessMins = dayTotal - dayPolicyMins - latePen;
           } else {
             // No record at all on working day — full day short
-            excessMins = -detailPolicyMins;
+            excessMins = -dayPolicyMins;
           }
 
           // Early going: left more than 30min before end time AND total hours < policy hours
           let earlyGoing=false;
-          if(!isFieldEmp&&policy&&lastOut?.punchOutTime&&!fieldRec&&!isExcused){
+          if(!isFieldDay&&policy&&lastOut?.punchOutTime&&!fieldRec&&!isExcused){
             const outD=lastOut.punchOutTime.toDate?lastOut.punchOutTime.toDate():new Date(lastOut.punchOutTime);
             const outMins=outD.getHours()*60+outD.getMinutes();
             const endMins=parseTime(policy.workEndTime);
@@ -724,6 +741,9 @@ export default function MonthlyReportPage() {
                           <p className="text-sm font-semibold text-gray-800">{d.user.name??d.user.email}</p>
                           {((d.policy as any)?.policyType==="field"||(d.user as any).employeeType==="field")&&(
                             <span className="text-xs bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full font-semibold">🚗</span>
+                          )}
+                          {(d.user as any).employeeType==="office"&&(d.user as any).allowFieldWork===true&&(
+                            <span className="text-xs bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full font-semibold">🏢🚗</span>
                           )}
                         </div>
                         {d.user.employeeId&&<p className="text-xs text-blue-500 font-mono">{d.user.employeeId}</p>}

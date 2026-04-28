@@ -4,6 +4,187 @@ import { collection, getDocs, query, where } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
 import { getTeamMembersForManager, getDirectorMembers } from "@/lib/team-utils";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from "recharts";
+
+// ── Trend chart for dashboard ──────────────────────────────────────────────────
+function TrendChart({ isAdmin, isDirector, user }: { isAdmin:boolean; isDirector:boolean; user:any }) {
+  const [period, setPeriod]   = useState<"week"|"month">("month");
+  const [users, setUsers]     = useState<{id:string;name:string}[]>([]);
+  const [selectedUser, setSelectedUser] = useState<string>("all");
+  const [data, setData]       = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(()=>{
+    const loadUsers = async () => {
+      try {
+        let memberIds: string[] | null = null;
+        // For non-admin/non-HR, scope to team — but only if user is loaded
+        if (!isAdmin && user) {
+          const m = isDirector ? await getDirectorMembers(user.uid, db) : await getTeamMembersForManager(user.uid, db);
+          memberIds = m.map((x:any)=>x.id);
+        } else if (!isAdmin && !user) {
+          // Non-admin without user yet — skip loading until user arrives
+          return;
+        }
+        const snap = await getDocs(collection(db,"users"));
+        let list = snap.docs.map(d=>{
+          const x = d.data() as any;
+          // Try every possible name field — covers all the variations seen in Firestore
+          const candidates = [
+            x.name, x.displayName, x.fullName, x.userName, x.firstName,
+            (x.firstName && x.lastName) ? `${x.firstName} ${x.lastName}` : null,
+          ];
+          let name = "";
+          for (const c of candidates) {
+            if (typeof c === "string" && c.trim()) { name = c.trim(); break; }
+          }
+          if (!name && typeof x.email === "string" && x.email.includes("@")) {
+            name = x.email.split("@")[0];
+          }
+          if (!name) name = d.id.slice(0,8);
+          return { id: d.id, name };
+        });
+        if (memberIds) list = list.filter(u=>memberIds!.includes(u.id));
+        // De-dup just in case
+        const uniq = new Map<string,{id:string;name:string}>();
+        list.forEach(u => { if (!uniq.has(u.id)) uniq.set(u.id, u); });
+        const sorted = Array.from(uniq.values()).sort((a,b)=>a.name.localeCompare(b.name));
+        console.log("[TrendChart] Loaded", sorted.length, "users for dropdown:", sorted.map(u=>u.name).slice(0,5));
+        setUsers(sorted);
+      } catch (e) {
+        console.error("[TrendChart] Failed to load users for chart:", e);
+      }
+    };
+    loadUsers();
+  },[isAdmin, isDirector, user]);
+
+  useEffect(()=>{
+    const loadData = async () => {
+      setLoading(true);
+      try {
+        const days = period === "week" ? 7 : 30;
+        const today = new Date();
+        const startDate = new Date(today);
+        startDate.setDate(startDate.getDate() - days + 1);
+        startDate.setHours(0,0,0,0);
+        const startStr = `${startDate.getFullYear()}-${String(startDate.getMonth()+1).padStart(2,"0")}-${String(startDate.getDate()).padStart(2,"0")}`;
+        const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
+
+        // Fetch attendance + checkins
+        const [attTsSnap, attDsSnap, ciSnap] = await Promise.all([
+          getDocs(query(collection(db,"attendance"), where("timestamp",">=",startDate))),
+          getDocs(query(collection(db,"attendance"), where("dateStr",">=",startStr), where("dateStr","<=",todayStr))),
+          getDocs(query(collection(db,"checkins"), where("timestamp",">=",startDate))),
+        ]);
+
+        // Merge attendance dual-query
+        const seen = new Set<string>();
+        const allAtt: any[] = [];
+        attTsSnap.docs.forEach(d => {
+          const r = d.data() as any;
+          if (r.type !== "absent" && r.type !== "field-day") {
+            if(!seen.has(d.id)){seen.add(d.id); allAtt.push({id:d.id, ...r});}
+          }
+        });
+        attDsSnap.docs.forEach(d => {
+          if(!seen.has(d.id)){seen.add(d.id); allAtt.push({id:d.id, ...d.data()});}
+        });
+        const allCi = ciSnap.docs.map(d=>({id:d.id, ...d.data()} as any));
+
+        // Filter by selected user if applicable
+        const userFilter = (r:any) => selectedUser === "all" || r.userId === selectedUser;
+        const att = allAtt.filter(userFilter);
+        const ci  = allCi.filter(userFilter);
+
+        // Build per-day map
+        const dayMap = new Map<string,{date:string; lates:number; absents:number; outerVisits:number; siteVisits:number}>();
+        for(let i=0;i<days;i++){
+          const d = new Date(startDate);
+          d.setDate(d.getDate()+i);
+          const ds = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+          const label = period === "week"
+            ? d.toLocaleDateString("en-US",{weekday:"short", day:"numeric"})
+            : `${d.getMonth()+1}/${d.getDate()}`;
+          dayMap.set(ds, { date: label, lates:0, absents:0, outerVisits:0, siteVisits:0 });
+        }
+
+        // Count lates and absents from attendance
+        att.forEach(r => {
+          let ds = r.dateStr;
+          if (!ds && r.timestamp?.toDate) {
+            const t = r.timestamp.toDate();
+            ds = `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`;
+          }
+          const slot = dayMap.get(ds);
+          if (!slot) return;
+          if (r.lateStatus === "late" && r.type === "punch-in") slot.lates++;
+          if (r.type === "absent") slot.absents++;
+        });
+
+        // Count check-ins by type
+        ci.forEach(r => {
+          if (!r.checkInTime?.toDate) return;
+          const t = r.checkInTime.toDate();
+          const ds = `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`;
+          const slot = dayMap.get(ds);
+          if (!slot) return;
+          if (r.subType === "outer-visit" || r.subType === "outer") slot.outerVisits++;
+          else slot.siteVisits++;
+        });
+
+        setData(Array.from(dayMap.values()));
+      } catch(e:any) {
+        console.error("trend load error:", e);
+      } finally { setLoading(false); }
+    };
+    loadData();
+  },[period, selectedUser]);
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 mb-6">
+      <div className="flex justify-between items-center mb-4 flex-wrap gap-3">
+        <h2 className="text-base font-bold text-gray-800">Activity trends</h2>
+        <div className="flex gap-2 items-center flex-wrap">
+          {/* User filter */}
+          <select value={selectedUser} onChange={e=>setSelectedUser(e.target.value)}
+            className="border border-gray-200 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="all">All employees ({users.length})</option>
+            {users.length === 0 ? <option disabled>Loading users…</option> : null}
+            {users.map(u=><option key={u.id} value={u.id}>{u.name}</option>)}
+          </select>
+          {/* Period toggle */}
+          <div className="flex gap-1 bg-gray-100 rounded-lg p-0.5">
+            {(["week","month"] as const).map(p=>(
+              <button key={p} onClick={()=>setPeriod(p)}
+                className={`px-3 py-1 rounded-md text-xs font-semibold transition ${period===p?"bg-white text-gray-800 shadow-sm":"text-gray-500"}`}>
+                {p === "week" ? "7 days" : "30 days"}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+      {loading ? (
+        <div className="h-72 flex items-center justify-center text-gray-400 text-sm">Loading...</div>
+      ) : (
+        <div className="h-72">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={data} margin={{top:5,right:20,left:0,bottom:5}}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0"/>
+              <XAxis dataKey="date" tick={{fontSize:11,fill:"#666"}} interval={period==="month"?2:0}/>
+              <YAxis tick={{fontSize:11,fill:"#666"}} allowDecimals={false}/>
+              <Tooltip contentStyle={{fontSize:12, borderRadius:8, border:"1px solid #e5e7eb"}}/>
+              <Legend wrapperStyle={{fontSize:12}}/>
+              <Line type="monotone" dataKey="lates"       stroke="#f59e0b" strokeWidth={2} name="🕐 Lates"          dot={{r:3}}/>
+              <Line type="monotone" dataKey="absents"     stroke="#ef4444" strokeWidth={2} name="❌ Absents"        dot={{r:3}}/>
+              <Line type="monotone" dataKey="siteVisits"  stroke="#3b82f6" strokeWidth={2} name="📍 Site Visits"    dot={{r:3}}/>
+              <Line type="monotone" dataKey="outerVisits" stroke="#8b5cf6" strokeWidth={2} name="🚗 Outer Visits"   dot={{r:3}}/>
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+    </div>
+  );
+}
 
 interface Stats {
   totalUsers:number; presentToday:number; absentToday:number;
@@ -138,6 +319,9 @@ export default function DashboardPage() {
           />
         </div>
       )}
+
+      {/* Trend chart */}
+      <TrendChart isAdmin={isAdmin} isDirector={isDirector} user={user} />
 
       <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
         <h2 className="text-base font-bold text-gray-800 mb-4">Quick actions</h2>

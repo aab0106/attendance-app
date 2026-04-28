@@ -94,7 +94,7 @@ export default function SettingsPage() {
   };
 
   const cleanStaleAbsent = async () => {
-    if (!confirm("This will scan all absent records and delete:\n1. Absent records for TODAY (shouldn't exist)\n2. Absent records for any day where the same user has a punch-in (duplicates)\n\nContinue?")) return;
+    if (!confirm("This will scan all absent records and delete:\n1. Absent records for TODAY or future\n2. Absent records with NO dateStr (corrupt data)\n3. Absent records where the same user has a punch-in OR check-in same day\n4. Duplicate absent records (same user + same date) — keeps newest\n\nContinue?")) return;
     setCleaningAbsent(true); setCleanupResult(null);
     try {
       const { collection, getDocs, query, where, doc, deleteDoc } = await import("firebase/firestore");
@@ -105,7 +105,7 @@ export default function SettingsPage() {
       const absSnap = await getDocs(query(collection(db,"attendance"), where("type","==","absent")));
       const absents = absSnap.docs.map(d => ({ id:d.id, ...d.data() } as any));
 
-      // Get all punch-ins
+      // Get all punch-ins (build punchKeys for dedup)
       const piSnap = await getDocs(query(collection(db,"attendance"), where("type","==","punch-in")));
       const punchKeys = new Set<string>();
       piSnap.docs.forEach(d => {
@@ -118,18 +118,57 @@ export default function SettingsPage() {
         if (ds) punchKeys.add(`${x.userId}_${ds}`);
       });
 
-      let deletedToday = 0, deletedDup = 0;
-      for (const a of absents) {
-        const key = `${a.userId}_${a.dateStr}`;
-        if (a.dateStr === todayStr) {
+      // Get all check-ins (also count toward presence)
+      const ciSnap = await getDocs(collection(db,"checkins"));
+      ciSnap.docs.forEach(d => {
+        const x = d.data() as any;
+        let ds = x.dateStr;
+        if (!ds && x.checkInTime?.toDate) {
+          const t = x.checkInTime.toDate();
+          ds = `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`;
+        }
+        if (ds) punchKeys.add(`${x.userId}_${ds}`);
+      });
+
+      let deletedToday = 0, deletedDup = 0, deletedNoDateStr = 0, deletedDuplicate = 0;
+      // Track first-seen absent per userId+dateStr for dedup (keep newest)
+      // Sort absents by timestamp desc — newer first
+      const sorted = [...absents].sort((a,b) => {
+        const tA = a.timestamp?.toDate?.()?.getTime() ?? 0;
+        const tB = b.timestamp?.toDate?.()?.getTime() ?? 0;
+        return tB - tA;
+      });
+      const seenKeys = new Set<string>();
+
+      for (const a of sorted) {
+        // 1. No dateStr → corrupt, delete
+        if (!a.dateStr) {
+          await deleteDoc(doc(db,"attendance",a.id));
+          deletedNoDateStr++;
+          continue;
+        }
+        // 2. Today or future → invalid, delete
+        if (a.dateStr >= todayStr) {
           await deleteDoc(doc(db,"attendance",a.id));
           deletedToday++;
-        } else if (punchKeys.has(key)) {
+          continue;
+        }
+        const key = `${a.userId}_${a.dateStr}`;
+        // 3. User has punch-in or check-in same day → conflict, delete
+        if (punchKeys.has(key)) {
           await deleteDoc(doc(db,"attendance",a.id));
           deletedDup++;
+          continue;
         }
+        // 4. Already kept a newer absent for this user+date → duplicate, delete
+        if (seenKeys.has(key)) {
+          await deleteDoc(doc(db,"attendance",a.id));
+          deletedDuplicate++;
+          continue;
+        }
+        seenKeys.add(key);
       }
-      setCleanupResult({ deletedToday, deletedDup, scanned: absents.length });
+      setCleanupResult({ deletedToday, deletedDup, deletedNoDateStr, deletedDuplicate, scanned: absents.length });
     } catch(e:any) {
       setCleanupResult({ error: e.message });
     } finally { setCleaningAbsent(false); }
@@ -394,7 +433,15 @@ export default function SettingsPage() {
         {cleanupResult && (
           <div className={`mt-4 rounded-xl px-4 py-3 text-sm ${cleanupResult.error?"bg-red-50 text-red-700":"bg-green-50 text-green-700"}`}>
             {cleanupResult.error ? `Error: ${cleanupResult.error}` :
-              `✓ Cleanup done — Scanned ${cleanupResult.scanned} absent records. Deleted ${cleanupResult.deletedToday} for today + ${cleanupResult.deletedDup} duplicates with punch-ins.`}
+              <div>
+                <p className="font-semibold mb-1">✓ Cleanup done — scanned {cleanupResult.scanned} absent records:</p>
+                <ul className="text-xs space-y-0.5 ml-4 list-disc">
+                  <li>{cleanupResult.deletedToday} deleted for today/future date</li>
+                  <li>{cleanupResult.deletedNoDateStr} deleted with no dateStr (corrupt)</li>
+                  <li>{cleanupResult.deletedDup} deleted (user had punch-in/check-in same day)</li>
+                  <li>{cleanupResult.deletedDuplicate} deleted (duplicate of newer absent record)</li>
+                </ul>
+              </div>}
           </div>
         )}
       </div>
